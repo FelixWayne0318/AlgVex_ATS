@@ -208,9 +208,12 @@ mvp_data_sources:
 
 **MVP因子详细定义**:
 
-> **关键约束**: 所有窗口以 bar 数量计，5m 频率下 288 bars = 1 day
+> **关键约束**:
+> - K线数据窗口以 bar 数量计，5m 频率下 288 bars = 1 day
+> - 派生因子窗口 (如 vol_regime 的 MA) 以样本数量计，需明确说明
+> - OI 因子使用可见数据 (因 5min 延迟，OI[t-1] 是 signal_time=t 时的最新可见值)
 
-| 因子ID | 因子族 | 计算公式 (bars) | 数据依赖 | 可见性 |
+| 因子ID | 因子族 | 计算公式 | 数据依赖 | 可见性 |
 |--------|--------|----------|----------|--------|
 | return_5m | 动量 | close[t] / close[t-1] - 1 | klines_5m | bar_close |
 | return_1h | 动量 | close[t] / close[t-12] - 1 | klines_5m | bar_close |
@@ -218,11 +221,18 @@ mvp_data_sources:
 | breakout_20d | 动量 | (close - rolling_max(high, 5760)) / atr_288 | klines_5m | bar_close |
 | trend_strength | 动量 | ADX(14 bars) | klines_5m | bar_close |
 | atr_288 | 波动率 | ATR(288 bars) = 1 day | klines_5m | bar_close |
-| realized_vol_1d | 波动率 | std(return_5m, 288) = 1 day | klines_5m | bar_close |
-| vol_regime | 波动率 | realized_vol_1d / MA(realized_vol_1d, 30) | klines_5m | bar_close |
-| oi_change_rate | 订单流 | (OI[t] - OI[t-1]) / OI[t-1] | open_interest_5m | bar_close + 5min |
+| realized_vol_1d | 波动率 | std(return_5m, 288 bars) = 1 day | klines_5m | bar_close |
+| vol_regime | 波动率 | realized_vol_1d / MA(realized_vol_1d, 30 days) | klines_5m | bar_close |
+| oi_change_rate | 订单流 | (OI[t-1] - OI[t-2]) / OI[t-2] | open_interest_5m | bar_close + 5min |
 | funding_momentum | 订单流 | MA_settlement(3) - MA_settlement(8) | funding_8h (settled) | settlement_time |
 | oi_funding_divergence | 订单流 | sign(oi_change) != sign(funding) | aligned_asof join | max(oi_visible, funding_visible) |
+
+> **v1.1.0 重要修正**:
+> - `oi_change_rate`: 公式改为 `(OI[t-1] - OI[t-2]) / OI[t-2]`，因为 OI 有 5min 发布延迟
+>   - 在 signal_time=t 时，OI[t] 的 visible_time = t+5min > t，不可用
+>   - OI[t-1] 的 visible_time = t-5min+5min = t，刚好可用
+>   - 因此计算变化率需用 OI[t-1] 和 OI[t-2]
+> - `vol_regime`: 明确 MA(30 days) 是 30 天的日波动率平均值，需 30×288 = 8640 bars 数据
 
 **因子可见性规则**:
 
@@ -516,16 +526,20 @@ config_hash: "sha256:abc123..."  # 自动计算，CI检查一致性
 #
 # 定义:
 #   signal_time = bar_close_time (MVP固定)
-#   snapshot_cutoff = signal_time - safety_margin
+#   snapshot_cutoff = signal_time (对于 bar_close 类型数据)
 #   visible_time = 按数据类型计算 (见下方 visibility_types)
 #
-# 关键结果:
-#   - OI 等延迟数据在 signal_time=t 时，只能用 t-1 或更早的值
+# 重要说明 (v1.1.0 修正):
+#   - bar_close 数据: visible_time = bar_close_time = signal_time
+#     因此 snapshot_cutoff 必须 >= signal_time，即 safety_margin = 0
+#   - bar_close_delayed 数据 (如 OI): visible_time = bar_close_time + delay
+#     在 signal_time=t 时，OI[t] 的 visible_time = t + 5min > t，不可用
+#     OI[t-1] 的 visible_time = (t-5min) + 5min = t，刚好可用 (<=)
 #   - funding 只能用最近一次已结算的值
 #
 # ============================================================
 snapshot_cutoff_rule: "signal_time - safety_margin"
-safety_margin: "1s"  # 生产默认 1s，禁止负值
+safety_margin: "0s"  # v1.1.0修正: 改为0s，避免 bar_close 数据不可见
 
 visibility_types:
   realtime:
@@ -775,9 +789,13 @@ class DataService(ABC):
 # 使用示例
 def get_oi_for_signal(signal_time: datetime, symbol: str) -> float:
     """正确的 OI 获取方式"""
-    snapshot_cutoff = signal_time - timedelta(seconds=1)
+    # v1.1.0修正: snapshot_cutoff = signal_time (safety_margin = 0s)
+    snapshot_cutoff = signal_time
 
     # 必须用 asof_get, 不能直接取 OI[bar_time=signal_time]
+    # 在 signal_time=t 时:
+    #   - OI[t] 的 visible_time = t + 5min > t，不可用
+    #   - OI[t-1] 的 visible_time = (t-5min) + 5min = t，刚好可用
     oi_point = data_service.asof_get(
         source_id="open_interest_5m",
         cutoff_time=snapshot_cutoff,
@@ -1553,32 +1571,37 @@ jobs:
 
 ---
 
-### 0.9 S8: DataManager唯一入口 (P0-2)
+### 0.9 S8: 数据层唯一入口 (P0-2)
 
 > **要求**: 禁止任何模块直接读 DB/Redis/文件，所有数据访问必须经过 DataService 接口。
+>
+> **v1.1.0 术语澄清**:
+> - **DataService**: 抽象接口 (abstract interface)，定义数据访问方法，外部模块只能看到这个
+> - **DataManager**: 具体实现 (concrete implementation)，内部持有 DB/Redis 连接信息
+> - 外部模块通过依赖注入获取 DataService 接口，无法访问 DataManager 的连接信息
 
 #### 0.9.1 唯一入口架构
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        DataService (唯一数据入口)                            │
+│                      数据层架构 (接口与实现分离)                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  外部模块只能看到:                                                          │
+│  外部模块只能看到 (DataService 接口):                                        │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
-│  │  interface DataService:                                              │  │
+│  │  interface DataService:  # 抽象接口，无连接信息                       │  │
 │  │    get_bars(symbol, start, end, freq) -> DataFrame                   │  │
 │  │    get_snapshot(snapshot_id) -> Snapshot                             │  │
 │  │    get_factor(factor_id, symbol, bar_time) -> float                  │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 │                                                                             │
-│  内部实现 (对外不可见):                                                      │
+│  内部实现 (DataManager，对外不可见):                                         │
 │  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐               │
 │  │  TimescaleDB   │  │     Redis      │  │   Parquet      │               │
 │  │  (L0 事实源)   │  │   (L2 缓存)    │  │  (L1 快照)     │               │
 │  └────────────────┘  └────────────────┘  └────────────────┘               │
 │                                                                             │
-│  关键: 连接信息只在 DataManager 内部，外部模块拿不到连接串                    │
+│  关键: 连接信息只在 DataManager 内部，外部模块通过 DataService 接口访问      │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -1622,11 +1645,21 @@ class DataService(ABC):
         """获取持仓量"""
         pass
 
-# 禁止暴露内部实现
-# ❌ 不要这样做:
+# ============================================================
+# 接口与实现分离原则
+# ============================================================
+# ✅ 正确做法: DataManager 实现 DataService 接口，通过依赖注入使用
 # class DataManager(DataService):
-#     def __init__(self, db_url, redis_url):  # 暴露连接信息
-#         ...
+#     def __init__(self, db_url, redis_url):  # 连接信息只在 DataManager 内部
+#         self._db = connect(db_url)
+#         self._redis = connect(redis_url)
+#
+# def create_app():
+#     manager = DataManager(db_url=os.getenv("DB_URL"), ...)
+#     engine = FactorEngine(data_service=manager)  # 注入为 DataService 类型
+#
+# ❌ 禁止做法: 外部模块直接访问连接信息
+# engine = FactorEngine(db_url=..., redis_url=...)  # 不应该让外部知道连接信息
 ```
 
 #### 0.9.3 依赖注入

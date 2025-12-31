@@ -192,20 +192,39 @@ class MVPFactorEngine:
         return vol.dropna()
 
     def _compute_vol_regime_series(self, klines: pd.DataFrame) -> pd.Series:
-        """计算波动率状态序列"""
+        """
+        计算波动率状态序列
+
+        v1.1.0 说明:
+        - vol_regime = realized_vol_1d / MA(realized_vol_1d, 30 days)
+        - rolling(30) 是对每日波动率值做30个样本的移动平均
+        - 由于 realized_vol_1d 每个bar都有一个值，rolling(30) = 30 bars = 150 min
+        - 但每个 realized_vol_1d 值代表过去1天(288 bars)的波动率
+        - 有效回看窗口 ≈ 30 + 288 - 1 = 317 bars
+        - 需要至少 30×288 = 8640 bars 来计算30个独立的日波动率样本
+        """
         if klines is None or len(klines) < 288 * 30:
             return pd.Series(dtype=float)
         vol = self._compute_realized_vol_series(klines, 288)
+        # rolling(30) 对每日波动率做30个样本的平均
         vol_ma = vol.rolling(30).mean()
         regime = vol / (vol_ma + 1e-10)
         return regime.dropna()
 
     def _compute_oi_change_series(self, oi: pd.DataFrame) -> pd.Series:
-        """计算OI变化率序列"""
-        if oi is None or len(oi) < 2:
+        """
+        计算OI变化率序列
+
+        v1.1.0 修正:
+        - OI 有 5min 发布延迟，需要 shift(1) 来模拟可见性约束
+        - 公式: (OI[t-1] - OI[t-2]) / OI[t-2]
+        """
+        if oi is None or len(oi) < 3:
             return pd.Series(dtype=float)
         oi_val = oi["open_interest"]
-        change_rate = oi_val.pct_change()
+        # shift(1) 模拟 OI 延迟: 在 t 时刻使用 t-1 的数据
+        visible_oi = oi_val.shift(1)
+        change_rate = visible_oi.pct_change()
         return change_rate.dropna()
 
     def _compute_funding_momentum_series(self, funding: pd.DataFrame) -> pd.Series:
@@ -505,8 +524,8 @@ class MVPFactorEngine:
             "trend_strength": {"min_bars": 28, "description": "需要至少28条K线 (ADX计算)"},
             "atr_288": {"min_bars": 289, "description": "需要至少289条K线 (1天+1)"},
             "realized_vol_1d": {"min_bars": 289, "description": "需要至少289条K线 (1天+1)"},
-            "vol_regime": {"min_bars": 318, "description": "需要至少318条K线 (288+30)"},
-            "oi_change_rate": {"min_bars": 2, "description": "需要至少2条OI数据"},
+            "vol_regime": {"min_bars": 8640, "description": "需要至少8640条K线 (30天×288bars/天)"},
+            "oi_change_rate": {"min_bars": 3, "description": "需要至少3条OI数据 (使用t-1和t-2)"},
             "funding_momentum": {"min_bars": 8, "description": "需要至少8次资金费率结算"},
             "oi_funding_divergence": {"min_bars": 2, "description": "需要OI和Funding数据"},
         }
@@ -763,7 +782,15 @@ class MVPFactorEngine:
         klines: pd.DataFrame,
         signal_time: datetime,
     ) -> FactorValue:
-        """计算波动率状态: realized_vol_1d / MA(realized_vol_1d, 30)"""
+        """
+        计算波动率状态: realized_vol_1d / MA(realized_vol_1d, 30 days)
+
+        v1.1.0 说明:
+        - 计算30个独立的日波动率值 (每个使用288 bars = 1天数据)
+        - 取平均得到30天平均波动率
+        - vol_regime = 当前日波动率 / 30天平均波动率
+        - 需要 30×288 = 8640 bars 数据
+        """
         if len(klines) < 30 * 288:  # 需要30天数据
             return FactorValue(
                 factor_id="vol_regime",
@@ -809,8 +836,19 @@ class MVPFactorEngine:
         oi: pd.DataFrame,
         signal_time: datetime,
     ) -> FactorValue:
-        """计算持仓量变化率"""
-        if len(oi) < 2:
+        """
+        计算持仓量变化率
+
+        v1.1.0 修正:
+        - OI 有 5min 发布延迟，在 signal_time=t 时:
+          - OI[t] 的 visible_time = t + 5min > t，不可用
+          - OI[t-1] 的 visible_time = (t-5min) + 5min = t，刚好可用
+        - 因此公式改为: (OI[t-1] - OI[t-2]) / OI[t-2]
+        - 实现上，跳过最后一个 OI 值 (因为它是当前 bar 的，不可见)
+        """
+        # 需要至少3个OI值: OI[t], OI[t-1], OI[t-2]
+        # 由于 OI[t] 不可见，我们使用 OI[t-1] 和 OI[t-2]
+        if len(oi) < 3:
             return FactorValue(
                 factor_id="oi_change_rate",
                 value=np.nan,
@@ -821,10 +859,14 @@ class MVPFactorEngine:
             )
 
         oi_values = oi["open_interest"].values
-        change = (oi_values[-1] - oi_values[-2]) / (oi_values[-2] + 1e-10)
+        # 跳过最后一个值 (OI[t] 不可见)，使用 OI[t-1] 和 OI[t-2]
+        oi_t_1 = oi_values[-2]  # OI[t-1]，刚好可见
+        oi_t_2 = oi_values[-3]  # OI[t-2]，可见
+        change = (oi_t_1 - oi_t_2) / (oi_t_2 + 1e-10)
 
-        data_time = oi.index[-1] if hasattr(oi.index, '__iter__') else signal_time
-        # OI有5分钟延迟
+        # 使用 OI[t-1] 的时间作为数据时间
+        data_time = oi.index[-2] if hasattr(oi.index, '__iter__') and len(oi.index) >= 2 else signal_time
+        # OI[t-1] 的 visible_time = data_time + 5min
         visible_time = data_time + timedelta(minutes=5)
 
         return FactorValue(

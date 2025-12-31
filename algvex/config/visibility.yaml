@@ -2,10 +2,10 @@
 # AlgVex 可见性规则配置
 # 文件: config/visibility.yaml
 # 说明: 定义数据可见性规则，防止未来信息泄露 (Lookahead)
-# 版本: 1.0.0
+# 版本: 1.1.0
 # ============================================================
 
-config_version: "1.0.0"
+config_version: "1.1.0"
 config_hash: ""  # 由 config_validator.py 自动计算
 
 # ============================================================
@@ -14,14 +14,22 @@ config_hash: ""  # 由 config_validator.py 自动计算
 #
 # 定义:
 #   signal_time = bar_close_time (MVP固定为5分钟K线收盘时间)
-#   snapshot_cutoff = signal_time - safety_margin
+#   snapshot_cutoff = signal_time (对于 bar_close 类型数据)
 #   visible_time = 按数据类型计算 (见下方 visibility_types)
+#
+# 重要修正 (v1.1.0):
+#   - bar_close 数据: snapshot_cutoff = signal_time (无安全边际)
+#     原因: bar_close_time = signal_time, 若有 safety_margin 会导致当前 bar 数据不可见
+#   - realtime 数据: 使用 latency_buffer 处理网络延迟
+#   - bar_close_delayed 数据: 使用 publication_delay 处理发布延迟
 #
 # ============================================================
 
 # 快照截止规则
+# 注意: safety_margin 仅用于 realtime 数据的网络延迟保护
+# 对于 bar_close 数据，snapshot_cutoff = signal_time (即 safety_margin = 0)
 snapshot_cutoff_rule: "signal_time - safety_margin"
-safety_margin: "1s"  # 生产默认1秒，禁止负值
+safety_margin: "0s"  # v1.1.0修正: 改为0s，避免 bar_close 数据不可见的逻辑矛盾
 
 # ============================================================
 # 可见性类型定义

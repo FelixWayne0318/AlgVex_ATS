@@ -80,8 +80,9 @@ class VisibilityChecker:
                 return yaml.safe_load(f)
         except FileNotFoundError:
             # 返回默认配置
+            # v1.1.0修正: safety_margin 改为 0s，避免 bar_close 数据不可见的逻辑矛盾
             return {
-                "safety_margin": "1s",
+                "safety_margin": "0s",
                 "visibility_types": {
                     "realtime": {"latency_buffer": "1s"},
                     "bar_close": {},
