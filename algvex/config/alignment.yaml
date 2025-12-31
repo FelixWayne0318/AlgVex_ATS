@@ -1,0 +1,153 @@
+# ============================================================
+# 文件: config/alignment.yaml
+# 说明: 对齐与追踪配置 (S5)
+# ============================================================
+config_version: "1.0.0"
+config_hash: "sha256:alignment_v1_placeholder"
+
+# ============================================================
+# Trace Schema 配置
+# ============================================================
+trace_schema:
+  # 每条信号/交易必须记录的追踪信息
+  required_fields:
+    - trace_id           # 唯一追踪ID
+    - run_mode           # "live" | "replay" | "backtest"
+    - timestamp          # 执行时间 (ISO8601 UTC)
+    - contract_hash      # visibility.yaml + data_contracts/*.yaml 的联合hash
+    - config_hash        # 所有配置文件的联合hash
+    - code_hash          # 代码版本 (git commit hash)
+    - data_hash          # 输入数据的hash
+
+  # 信号追踪字段
+  signal_trace_fields:
+    - signal_id          # 唯一标识: f"{symbol}|{bar_close_time_iso}|{strategy_id}"
+    - snapshot_id        # 快照ID
+    - symbol             # 交易对
+    - bar_close_time     # Bar收盘时间
+    - factors_used       # 使用的因子及其值 Dict[str, float]
+    - model_version      # 模型版本
+    - raw_prediction     # 模型原始输出
+    - final_signal       # 最终信号 (-1 到 1)
+
+  # 执行追踪字段
+  execution_trace_fields:
+    - order_id           # 订单ID
+    - order_intent       # 下单意图
+    - fill_reports       # 成交报告列表
+    - slippage_actual    # 实际滑点
+    - commission_actual  # 实际手续费
+
+  # 序列化规范 (确保确定性)
+  serialization:
+    format: "json"
+    sort_keys: true
+    separators: [",", ":"]   # 无空格，紧凑格式
+    ensure_ascii: false
+    float_precision: 8       # 浮点数保留8位小数
+
+# ============================================================
+# signal_id 生成规则
+# ============================================================
+signal_id_format:
+  pattern: "{symbol}|{bar_close_time}|{strategy_id}"
+  bar_close_time_format: "%Y-%m-%dT%H:%M:%SZ"
+  examples:
+    - "BTCUSDT|2024-01-15T12:00:00Z|mvp_v1"
+    - "ETHUSDT|2024-01-15T12:05:00Z|mvp_v1"
+
+# ============================================================
+# Daily Replay 对齐配置
+# ============================================================
+daily_alignment:
+  # 调度配置
+  schedule:
+    run_time: "01:00"        # UTC 每日凌晨1点运行
+    timezone: "UTC"
+    retry_count: 3
+    retry_delay: "10m"
+
+  # 输入/输出路径
+  paths:
+    live_output_pattern: "logs/live_output_{date}.jsonl"
+    replay_output_pattern: "logs/replay_output_{date}.jsonl"
+    alignment_report_pattern: "logs/alignment_report_{date}.json"
+    snapshot_dir: "data/snapshots/"
+
+  # 对齐验收标准 (分层)
+  acceptance_criteria:
+    # L1 (硬): 输入数据必须完全相同
+    data_hash:
+      tolerance: 0
+      on_mismatch: "fail"
+
+    # L2 (硬): 特征向量必须完全相同
+    features_hash:
+      tolerance: 0
+      on_mismatch: "fail"
+
+    # L3 (软): 模型推理允许微小浮点误差
+    raw_prediction:
+      absolute_tolerance: 1e-8
+      relative_tolerance: 1e-6
+      max_diff_threshold: 1e-4
+      on_mismatch: "warn"
+
+    # L4 (硬): 最终信号必须完全相同
+    final_signal:
+      tolerance: 0
+      on_mismatch: "fail"
+
+    # L5 (软): 执行层允许差异
+    execution:
+      price_diff_bps: 10       # 成交价差容差 (bps)
+      commission_diff_pct: 5   # 手续费差容差 (%)
+      slippage_diff_bps: 20    # 滑点差容差 (bps)
+      pnl_diff_pct: 10         # 总PnL差容差 (%)
+      on_mismatch: "warn"
+
+  # 告警阈值
+  alert_thresholds:
+    max_missing_signals: 0     # 允许的缺失信号数
+    max_signal_diff: 0.001     # 信号差异阈值 (0.1%)
+    max_mismatched_signals: 0  # 允许的不匹配信号数
+
+# ============================================================
+# PnL 归因配置
+# ============================================================
+pnl_attribution:
+  # 必须拆分的成本项
+  cost_components:
+    - "trading_fee"        # 交易手续费
+    - "funding_fee"        # 资金费率
+    - "slippage_cost"      # 滑点成本
+    - "market_impact"      # 市场冲击成本 (可选)
+
+  # 归因公式: net_pnl = gross_pnl - sum(costs)
+  validation:
+    tolerance: 0.01        # 归因误差容差 (绝对值)
+    on_validation_fail: "warn"
+
+# ============================================================
+# 确定性保障配置
+# ============================================================
+determinism:
+  # 环境变量要求
+  required_env_vars:
+    PYTHONHASHSEED: "42"
+
+  # 随机种子
+  random_seed: 42
+
+  # 线程配置 (单线程确保确定性)
+  thread_config:
+    OMP_NUM_THREADS: "1"
+    MKL_NUM_THREADS: "1"
+    OPENBLAS_NUM_THREADS: "1"
+    NUMEXPR_NUM_THREADS: "1"
+
+  # 浮点数配置
+  float_config:
+    use_decimal_for_positions: true
+    use_decimal_for_prices: true
+    float_comparison_tolerance: 1e-10

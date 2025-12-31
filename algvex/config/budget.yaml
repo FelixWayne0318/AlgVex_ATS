@@ -1,0 +1,166 @@
+# ============================================================
+# 文件: config/budget.yaml
+# 说明: 资源预算与降级策略配置 (S3)
+# ============================================================
+config_version: "1.0.0"
+config_hash: "sha256:budget_v1_placeholder"
+
+# ============================================================
+# 全局资源预算
+# ============================================================
+global_budget:
+  # 网络资源
+  network:
+    max_websocket_connections: 50
+    max_rest_calls_per_second: 100
+    max_rest_calls_per_minute: 1200
+    max_bandwidth_mbps: 10
+
+  # 计算资源
+  compute:
+    max_factor_compute_time_per_bar: "30s"
+    max_signal_latency: "5s"
+    max_memory_mb: 4096
+    max_cpu_percent: 80
+
+  # 存储资源
+  storage:
+    max_snapshot_size_gb: 10
+    max_log_retention_days: 30
+    max_trace_retention_days: 90
+
+# ============================================================
+# Universe 预算
+# ============================================================
+universe_budget:
+  default_symbols:
+    - "BTCUSDT"
+    - "ETHUSDT"
+  max_symbols_normal: 50
+  max_symbols_degraded: 20
+  max_symbols_emergency: 5
+
+# ============================================================
+# 数据源预算 (按数据源细分)
+# ============================================================
+data_source_budgets:
+  klines_5m:
+    max_symbols: 50
+    max_history_days: 365
+    max_requests_per_minute: 60
+    priority: 1  # 最高优先级
+
+  open_interest_5m:
+    max_symbols: 50
+    max_history_days: 180
+    max_requests_per_minute: 30
+    priority: 2
+
+  funding_8h:
+    max_symbols: 50
+    max_history_days: 365
+    max_requests_per_minute: 20
+    priority: 1
+
+# ============================================================
+# 降级策略 (分级触发)
+# ============================================================
+degrade_policy:
+  levels:
+    # L1: 轻度降级
+    - level: "L1"
+      trigger_conditions:
+        - "api_usage > 70%"
+        - "latency_p99 > 5s"
+      actions:
+        - "reduce_universe: top-20"
+        - "disable_non_critical_factors"
+      alert_severity: "warning"
+      auto_recover: true
+      recover_after: "5m"
+
+    # L2: 中度降级
+    - level: "L2"
+      trigger_conditions:
+        - "api_usage > 90%"
+        - "latency_p99 > 15s"
+        - "error_rate > 5%"
+      actions:
+        - "reduce_universe: top-10"
+        - "disable_orderflow_factors"
+        - "pause_new_positions"
+      alert_severity: "critical"
+      auto_recover: true
+      recover_after: "15m"
+
+    # L3: 重度降级
+    - level: "L3"
+      trigger_conditions:
+        - "api_usage > 95%"
+        - "latency_p99 > 30s"
+        - "error_rate > 10%"
+      actions:
+        - "reduce_universe: BTC_ETH_only"
+        - "only_momentum_factors"
+        - "pause_all_trading"
+      alert_severity: "emergency"
+      auto_recover: false
+      manual_recovery_required: true
+
+    # L4: 保护模式
+    - level: "L4"
+      trigger_conditions:
+        - "exchange_error"
+        - "data_feed_down"
+        - "critical_component_failure"
+      actions:
+        - "close_only_mode"
+        - "no_new_orders"
+        - "alert_oncall"
+      alert_severity: "emergency"
+      auto_recover: false
+      manual_recovery_required: true
+
+# ============================================================
+# 告警配置
+# ============================================================
+alerting:
+  channels:
+    - type: "log"
+      enabled: true
+      min_severity: "warning"
+
+    - type: "slack"
+      enabled: false
+      webhook_url: "${SLACK_WEBHOOK_URL}"
+      min_severity: "critical"
+
+    - type: "email"
+      enabled: false
+      recipients: ["admin@algvex.com"]
+      min_severity: "emergency"
+
+  # 告警抑制 (防止告警风暴)
+  suppression:
+    same_alert_cooldown: "5m"
+    max_alerts_per_hour: 60
+
+# ============================================================
+# 监控指标
+# ============================================================
+metrics:
+  collect_interval: "10s"
+  export_format: "prometheus"
+  export_port: 9090
+
+  tracked_metrics:
+    - "api_calls_per_minute"
+    - "api_latency_p50"
+    - "api_latency_p99"
+    - "error_rate"
+    - "factor_compute_time"
+    - "signal_latency"
+    - "memory_usage"
+    - "cpu_usage"
+    - "active_symbols"
+    - "degrade_level"

@@ -1,0 +1,44 @@
+name: Issue Triage
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  triage-issue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code for Issue Triage
+        uses: anthropics/claude-code-action@v1
+        with:
+          prompt: |
+            Analyze this new issue and apply appropriate labels.
+
+            Issue: #${{ github.event.issue.number }}
+            Repository: ${{ github.repository }}
+
+            Your task:
+            1. Read the issue title and body using mcp__github__get_issue
+            2. Determine the appropriate labels based on:
+               - Type: bug, feature, question, documentation
+               - Priority: low, medium, high, critical
+               - Area: which component or area of the codebase
+
+            Apply the labels using mcp__github__update_issue.
+            If the issue is unclear, add a comment asking for clarification using mcp__github__create_issue_comment.
+
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_non_write_users: "*"
+          claude_args: |
+            --allowedTools "mcp__github__get_issue,mcp__github__update_issue,mcp__github__create_issue_comment"

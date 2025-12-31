@@ -1,0 +1,95 @@
+# ============================================================
+# 数据契约: 5分钟持仓量数据
+# 文件: config/data_contracts/open_interest_5m.yaml
+# ============================================================
+
+contract_version: "1.0.0"
+contract_hash: ""  # 自动计算
+
+# 基本信息
+source_id: "open_interest_5m"
+description: "5分钟持仓量快照"
+provider: "binance"
+tier: "B"  # B档：重要但有延迟
+
+# 数据频率
+frequency: "5min"
+
+# 可见性规则 (关键!)
+visibility:
+  type: "bar_close_delayed"
+  delay: "5min"  # 币安OI数据有约5分钟发布延迟
+  description: "K线收盘后约5分钟可见"
+
+  # 重要说明:
+  # 在 signal_time=t 时，只能使用 t-1 bar 的 OI 数据
+  # 例如: 10:05 信号只能用 10:00 之前的 OI
+
+# 数据模式
+schema:
+  fields:
+    - name: "timestamp"
+      type: "datetime"
+      description: "数据时间戳 (UTC)"
+      nullable: false
+
+    - name: "symbol"
+      type: "string"
+      description: "交易对 (如 BTCUSDT)"
+      nullable: false
+
+    - name: "open_interest"
+      type: "float64"
+      description: "持仓量 (张)"
+      nullable: false
+      constraints:
+        min: 0
+
+    - name: "open_interest_value"
+      type: "float64"
+      description: "持仓价值 (USDT)"
+      nullable: false
+      constraints:
+        min: 0
+
+  primary_key: ["symbol", "timestamp"]
+
+  indexes:
+    - ["timestamp"]
+    - ["symbol", "timestamp"]
+
+# 数据质量规则
+quality_rules:
+  completeness:
+    max_missing_ratio: 0.05  # 最多5%缺失 (B档容忍度更高)
+    required_fields: ["open_interest"]
+
+  consistency:
+    - rule: "open_interest >= 0"
+      description: "持仓量不能为负"
+    - rule: "open_interest_value >= 0"
+      description: "持仓价值不能为负"
+
+  outliers:
+    # OI变化超过20%告警
+    change_threshold: 0.2
+    description: "单周期OI变化超过20%可能是异常"
+
+# API配置
+api:
+  endpoint: "https://fapi.binance.com/fapi/v1/openInterest"
+  rate_limit:
+    weight: 1
+    max_per_minute: 1200
+
+  # 历史数据API
+  historical_endpoint: "https://fapi.binance.com/futures/data/openInterestHist"
+  historical_params:
+    period: "5m"
+    limit: 500
+
+# 存储配置
+storage:
+  table_name: "binance_oi_5m"
+  partition_by: "month"
+  retention_days: 180

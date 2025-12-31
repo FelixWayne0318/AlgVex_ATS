@@ -1,0 +1,271 @@
+# ============================================================
+# AlgVex 加密货币量化交易教程配置文件
+# ============================================================
+# 版本: v1.0
+# 说明: 将此文件复制到项目目录并根据需要修改
+# 用法: config = load_config('tutorial_config.yaml')
+# ============================================================
+
+# ----------------------------------------------------------
+# 基础配置
+# ----------------------------------------------------------
+qlib_init:
+  provider_uri: ~/.algvex/qlib_data
+  region: crypto
+
+project:
+  name: AlgVex Tutorial
+  version: "3.12"
+  data_dir: ./data/crypto
+
+# ----------------------------------------------------------
+# 交易对配置
+# ----------------------------------------------------------
+trading:
+  # 主要交易对
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+
+  # 可选扩展交易对 (取消注释启用)
+  # extended_symbols:
+  #   - BNBUSDT
+  #   - SOLUSDT
+  #   - XRPUSDT
+
+  # 时间框架
+  timeframe: 1h
+
+  # 基准币种
+  quote_currency: USDT
+
+# ----------------------------------------------------------
+# 时间配置
+# ----------------------------------------------------------
+time_range:
+  # 数据获取范围
+  data_start: "2024-01-01"
+  data_end: "2024-12-23"
+
+  # 训练/验证/测试划分
+  train_start: "2024-01-01"
+  train_end: "2024-08-31"
+  valid_start: "2024-09-01"
+  valid_end: "2024-10-31"
+  test_start: "2024-11-01"
+  test_end: "2024-12-23"
+
+# ----------------------------------------------------------
+# 资金与风控配置
+# ----------------------------------------------------------
+capital:
+  # 初始资金
+  initial_capital: 10000.0
+  quote_currency: USDT
+
+  # 杠杆设置
+  leverage: 3.0
+  max_leverage: 10.0
+
+  # 仓位管理
+  position_size: 0.1  # 单次仓位比例 (10%)
+  max_positions: 5    # 最大持仓数量
+
+# ----------------------------------------------------------
+# 费率配置
+# ----------------------------------------------------------
+fees:
+  # 交易费率 (Binance VIP0)
+  taker_fee: 0.0004   # 0.04%
+  maker_fee: 0.0002   # 0.02%
+
+  # 滑点估计
+  slippage: 0.0001    # 0.01%
+
+# ----------------------------------------------------------
+# 风控配置
+# ----------------------------------------------------------
+risk:
+  # 强平阈值
+  liquidation_threshold: 0.8
+  maintenance_margin_rate: 0.005
+
+  # 止损止盈
+  stop_loss: 0.05     # 5%
+  take_profit: 0.15   # 15%
+
+  # 最大回撤限制
+  max_drawdown: 0.20  # 20%
+
+# ----------------------------------------------------------
+# 数据采集配置 (Qlib 风格)
+# ----------------------------------------------------------
+data_collector:
+  class: BinanceDataCollector
+  module_path: algvex.core.data.collector
+
+  kwargs:
+    # 采集的数据类型
+    data_types:
+      - klines
+      - funding_rate
+      - open_interest
+      - long_short_ratio
+      - taker_buy_sell
+
+    # 重试配置 (来自 Qlib)
+    max_collector_count: 3      # 最大重试次数
+    retry_delay: 2.0            # 重试间隔(秒)
+
+    # 并行配置
+    max_workers: 4              # 并行工作数
+
+    # 数据验证
+    check_data_length: 100      # 最小数据条数
+
+    # 速率限制
+    rate_limit_delay: 0.1       # API 调用间隔
+
+# ----------------------------------------------------------
+# 因子配置 (Qlib 风格处理器链)
+# ----------------------------------------------------------
+factor_handler:
+  class: CryptoFactorHandler
+  module_path: algvex.core.factor.handler
+
+  kwargs:
+    # 因子列表
+    factors:
+      # 动量因子
+      - name: momentum_1h
+        class: MomentumFactor
+        kwargs:
+          window: 1
+
+      - name: momentum_24h
+        class: MomentumFactor
+        kwargs:
+          window: 24
+
+      - name: momentum_7d
+        class: MomentumFactor
+        kwargs:
+          window: 168
+
+      # 波动率因子
+      - name: volatility_24h
+        class: VolatilityFactor
+        kwargs:
+          window: 24
+
+      - name: volatility_7d
+        class: VolatilityFactor
+        kwargs:
+          window: 168
+
+      # 资金费率因子
+      - name: funding_rate
+        class: FundingRateFactor
+        kwargs: {}
+
+      # 持仓量因子
+      - name: oi_change
+        class: OpenInterestChangeFactor
+        kwargs:
+          window: 24
+
+      # 多空比因子
+      - name: ls_ratio
+        class: LongShortRatioFactor
+        kwargs: {}
+
+      # 主动买卖因子
+      - name: taker_imbalance
+        class: TakerImbalanceFactor
+        kwargs: {}
+
+    # 处理器链 (Qlib 风格)
+    learn_processors:
+      - class: DropnaProcessor
+        kwargs: {}
+      - class: ZScoreNormalizer
+        kwargs:
+          clip: 3.0
+
+    infer_processors:
+      - class: DropnaProcessor
+        kwargs: {}
+
+# ----------------------------------------------------------
+# 模型配置
+# ----------------------------------------------------------
+model:
+  class: LGBModel
+  module_path: qlib.contrib.model.gbdt
+
+  kwargs:
+    # LightGBM 参数
+    n_estimators: 500
+    learning_rate: 0.05
+    max_depth: 8
+    num_leaves: 64
+    min_child_samples: 20
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_alpha: 0.1
+    reg_lambda: 0.1
+    random_state: 42
+    n_jobs: -1
+
+# ----------------------------------------------------------
+# 回测配置
+# ----------------------------------------------------------
+backtest:
+  class: CryptoBacktestEngine
+  module_path: algvex.core.backtest.engine
+
+  kwargs:
+    # 执行模式
+    fill_price: close_price  # close_price, mark_price, last_price
+    slippage_model: static   # static, dynamic
+
+    # 仓位模式
+    position_mode: one_way   # one_way, hedge
+
+    # 资金费率
+    enable_funding: true
+    funding_interval: 8h
+
+    # 记录详情
+    record_trades: true
+    record_positions: true
+    record_equity_curve: true
+
+# ----------------------------------------------------------
+# 实验追踪配置 (MLflow)
+# ----------------------------------------------------------
+experiment:
+  # MLflow 配置
+  tracking_uri: ./mlruns
+  experiment_name: algvex_crypto_tutorial
+
+  # 自动记录
+  log_params: true
+  log_metrics: true
+  log_artifacts: true
+
+  # 记录内容
+  artifacts:
+    - equity_curve
+    - trade_history
+    - factor_importance
+    - model_checkpoint
+
+# ----------------------------------------------------------
+# 日志配置
+# ----------------------------------------------------------
+logging:
+  level: INFO  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s | %(levelname)-8s | %(message)s"
+  file: ./logs/tutorial.log
+  rotation: 10 MB

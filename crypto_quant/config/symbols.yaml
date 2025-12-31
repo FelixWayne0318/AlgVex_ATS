@@ -1,0 +1,184 @@
+# CryptoQuant 交易标的配置
+
+# ==================== 主要交易标的 ====================
+# 按市值和流动性排序
+
+primary:
+  - symbol: "btcusdt"
+    name: "Bitcoin"
+    weight: 0.3
+    leverage: 3
+    enabled: true
+
+  - symbol: "ethusdt"
+    name: "Ethereum"
+    weight: 0.25
+    leverage: 3
+    enabled: true
+
+  - symbol: "bnbusdt"
+    name: "BNB"
+    weight: 0.15
+    leverage: 3
+    enabled: true
+
+  - symbol: "solusdt"
+    name: "Solana"
+    weight: 0.15
+    leverage: 3
+    enabled: true
+
+  - symbol: "xrpusdt"
+    name: "XRP"
+    weight: 0.15
+    leverage: 3
+    enabled: true
+
+# ==================== 次要交易标的 ====================
+# 中等市值，流动性较好
+
+secondary:
+  - symbol: "adausdt"
+    name: "Cardano"
+    leverage: 2
+    enabled: false
+
+  - symbol: "dogeusdt"
+    name: "Dogecoin"
+    leverage: 2
+    enabled: false
+
+  - symbol: "avaxusdt"
+    name: "Avalanche"
+    leverage: 2
+    enabled: false
+
+  - symbol: "maticusdt"
+    name: "Polygon"
+    leverage: 2
+    enabled: false
+
+  - symbol: "linkusdt"
+    name: "Chainlink"
+    leverage: 2
+    enabled: false
+
+  - symbol: "dotusdt"
+    name: "Polkadot"
+    leverage: 2
+    enabled: false
+
+  - symbol: "ltcusdt"
+    name: "Litecoin"
+    leverage: 2
+    enabled: false
+
+  - symbol: "atomusdt"
+    name: "Cosmos"
+    leverage: 2
+    enabled: false
+
+  - symbol: "uniusdt"
+    name: "Uniswap"
+    leverage: 2
+    enabled: false
+
+  - symbol: "aaveusdt"
+    name: "Aave"
+    leverage: 2
+    enabled: false
+
+# ==================== 高波动标的 ====================
+# 波动性高，风险大
+
+high_volatility:
+  - symbol: "pepeusdt"
+    name: "Pepe"
+    leverage: 1
+    enabled: false
+
+  - symbol: "shibusdt"
+    name: "Shiba Inu"
+    leverage: 1
+    enabled: false
+
+  - symbol: "wifusdt"
+    name: "dogwifhat"
+    leverage: 1
+    enabled: false
+
+  - symbol: "bonkusdt"
+    name: "Bonk"
+    leverage: 1
+    enabled: false
+
+# ==================== 标的配置规则 ====================
+rules:
+  # 最小交易量 (24h USDT成交量)
+  min_volume_24h: 100000000  # 1亿USDT
+
+  # 最小市值
+  min_market_cap: 1000000000  # 10亿USDT
+
+  # 上线天数
+  min_listing_days: 90
+
+  # 价格精度
+  price_precision:
+    btcusdt: 1
+    ethusdt: 2
+    bnbusdt: 2
+    solusdt: 3
+    default: 4
+
+  # 数量精度
+  quantity_precision:
+    btcusdt: 3
+    ethusdt: 3
+    bnbusdt: 2
+    solusdt: 1
+    default: 0
+
+# ==================== 标的分组 ====================
+groups:
+  # Layer 1 主链
+  layer1:
+    - btcusdt
+    - ethusdt
+    - solusdt
+    - avaxusdt
+    - atomusdt
+
+  # DeFi
+  defi:
+    - uniusdt
+    - aaveusdt
+    - linkusdt
+
+  # Meme
+  meme:
+    - dogeusdt
+    - shibusdt
+    - pepeusdt
+    - bonkusdt
+    - wifusdt
+
+  # 交易所代币
+  exchange:
+    - bnbusdt
+
+# ==================== 风控特殊规则 ====================
+risk_overrides:
+  # BTC允许更高杠杆
+  btcusdt:
+    max_leverage: 10
+    max_position_pct: 0.3
+
+  # 高波动币降低仓位
+  pepeusdt:
+    max_leverage: 2
+    max_position_pct: 0.05
+
+  shibusdt:
+    max_leverage: 2
+    max_position_pct: 0.05

@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Run basic checks
+        run: |
+          echo "Running CI checks..."
+
+          # 检查是否有 README
+          if [ -f "README.md" ]; then
+            echo "✅ README.md exists"
+          else
+            echo "❌ README.md not found"
+            exit 1
+          fi
+
+          # 检查 workflow 文件
+          echo "Checking workflow files..."
+          workflow_count=$(ls -1 .github/workflows/*.yml 2>/dev/null | wc -l)
+          echo "✅ Found $workflow_count workflow files"
+
+          echo "CI checks passed!"
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Run ShellCheck
+        run: |
+          echo "Running ShellCheck on shell scripts..."
+
+          # 查找所有 shell 脚本
+          if compgen -G "scripts/*.sh" > /dev/null; then
+            shellcheck scripts/*.sh
+            echo "✅ ShellCheck passed for all scripts"
+          else
+            echo "⚠️ No shell scripts found in scripts/"
+          fi
+
+  yaml-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: Run yamllint
+        run: |
+          echo "Running yamllint on workflow files..."
+          yamllint -d relaxed .github/workflows/*.yml
+          echo "✅ YAML lint passed for all workflow files"
