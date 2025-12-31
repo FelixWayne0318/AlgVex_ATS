@@ -32,15 +32,16 @@ class TestVisibilityChecker:
         signal_time = datetime(2024, 1, 1, 10, 5, 0)
         cutoff = self.checker.compute_snapshot_cutoff(signal_time)
 
-        # cutoff 应该在 signal_time 之前
-        assert cutoff < signal_time
+        # v1.1.0修正: safety_margin = 0s，所以 cutoff == signal_time
+        # 这确保 bar_close 数据在 signal_time 时刻可见
+        assert cutoff <= signal_time
 
     def test_klines_visibility(self):
         """测试K线数据可见性"""
-        # 信号时间需要在bar_close_time + safety_margin之后才能看到该bar
-        # 默认 safety_margin = 1s
+        # v1.1.0修正: safety_margin = 0s
+        # bar_close 数据在 bar_close_time 立即可见
         bar_close_time = datetime(2024, 1, 1, 10, 5, 0)
-        signal_time = datetime(2024, 1, 1, 10, 5, 2)  # 2秒后
+        signal_time = datetime(2024, 1, 1, 10, 5, 0)  # signal_time = bar_close_time
         data_time = datetime(2024, 1, 1, 10, 0, 0)
 
         result = self.checker.check_visibility(
@@ -50,7 +51,7 @@ class TestVisibilityChecker:
             bar_close_time=bar_close_time,
         )
 
-        # K线在bar收盘后+safety_margin应该可见
+        # K线在bar收盘时刻应该可见 (visible_time = bar_close_time = signal_time)
         assert result.is_visible
 
     def test_oi_delayed_visibility(self):
@@ -68,9 +69,27 @@ class TestVisibilityChecker:
 
         # OI有5分钟延迟，在signal_time应该不可见
         # visible_time = bar_close_time + 5min = 10:10
-        # snapshot_cutoff = signal_time - 1s = 10:04:59
-        # 10:10 > 10:04:59，所以不可见
+        # v1.1.0修正: snapshot_cutoff = signal_time = 10:05 (safety_margin = 0s)
+        # 10:10 > 10:05，所以不可见
         assert not result.is_visible
+
+    def test_oi_previous_bar_visibility(self):
+        """测试OI前一个bar的可见性 (v1.1.0新增)"""
+        signal_time = datetime(2024, 1, 1, 10, 5, 0)
+        # 前一个bar的OI: bar_close_time = 10:00
+        prev_bar_close_time = datetime(2024, 1, 1, 10, 0, 0)
+
+        result = self.checker.check_visibility(
+            source_id="open_interest_5m",
+            data_time=prev_bar_close_time,
+            signal_time=signal_time,
+            bar_close_time=prev_bar_close_time,
+        )
+
+        # OI[t-1] visible_time = 10:00 + 5min = 10:05
+        # snapshot_cutoff = 10:05
+        # 10:05 <= 10:05，所以可见
+        assert result.is_visible
 
     def test_get_usable_data_time(self):
         """测试获取可用数据时间"""
@@ -113,16 +132,19 @@ class TestVisibilityRules:
 
         # 尝试使用未来数据
         signal_time = datetime(2024, 1, 1, 10, 0, 0)
-        future_data_time = datetime(2024, 1, 1, 10, 5, 0)  # 5分钟后的数据
+        future_bar_close = datetime(2024, 1, 1, 10, 5, 0)  # 5分钟后的bar
 
         result = checker.check_visibility(
             source_id="klines_5m",
-            data_time=future_data_time,
+            data_time=future_bar_close,
             signal_time=signal_time,
-            bar_close_time=datetime(2024, 1, 1, 10, 5, 0),
+            bar_close_time=future_bar_close,  # bar_close_time在未来
         )
 
         # 未来数据应该不可见
+        # visible_time = bar_close_time = 10:05
+        # snapshot_cutoff = signal_time = 10:00
+        # 10:05 > 10:00 → 不可见
         assert not result.is_visible
 
     def test_funding_rate_visibility(self):
