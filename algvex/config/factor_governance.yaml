@@ -1,0 +1,215 @@
+# ============================================================
+# AlgVex 因子治理配置
+# 文件: config/factor_governance.yaml
+# 说明: 定义因子分层、准入规则、相关性检查
+# ============================================================
+
+config_version: "1.0.0"
+config_hash: ""  # 自动计算
+
+# ============================================================
+# 因子分层体系
+# ============================================================
+factor_tiers:
+  # 层级1: MVP生产因子 (当前阶段只用这些)
+  mvp:
+    description: "MVP生产因子，已验证稳定"
+    count: 11
+    factors:
+      # 动量族 (5个)
+      - id: "return_5m"
+        family: "momentum"
+        formula: "close[t] / close[t-1] - 1"
+        data_dependency: ["klines_5m"]
+        visibility: "bar_close"
+
+      - id: "return_1h"
+        family: "momentum"
+        formula: "close[t] / close[t-12] - 1"
+        data_dependency: ["klines_5m"]
+        visibility: "bar_close"
+
+      - id: "ma_cross"
+        family: "momentum"
+        formula: "MA(close, 5) / MA(close, 20) - 1"
+        data_dependency: ["klines_5m"]
+        visibility: "bar_close"
+
+      - id: "breakout_20d"
+        family: "momentum"
+        formula: "(close - rolling_max(high, 5760)) / atr_288"
+        data_dependency: ["klines_5m"]
+        visibility: "bar_close"
+        note: "5760 bars = 20 days at 5min frequency"
+
+      - id: "trend_strength"
+        family: "momentum"
+        formula: "ADX(14 bars)"
+        data_dependency: ["klines_5m"]
+        visibility: "bar_close"
+
+      # 波动率族 (3个)
+      - id: "atr_288"
+        family: "volatility"
+        formula: "ATR(288 bars)"
+        data_dependency: ["klines_5m"]
+        visibility: "bar_close"
+        note: "288 bars = 1 day at 5min frequency"
+
+      - id: "realized_vol_1d"
+        family: "volatility"
+        formula: "std(return_5m, 288)"
+        data_dependency: ["klines_5m"]
+        visibility: "bar_close"
+
+      - id: "vol_regime"
+        family: "volatility"
+        formula: "realized_vol_1d / MA(realized_vol_1d, 30)"
+        data_dependency: ["klines_5m"]
+        visibility: "bar_close"
+
+      # 订单流族 (3个)
+      - id: "oi_change_rate"
+        family: "order_flow"
+        formula: "(OI[t] - OI[t-1]) / OI[t-1]"
+        data_dependency: ["open_interest_5m"]
+        visibility: "bar_close_delayed"
+        delay: "5min"
+
+      - id: "funding_momentum"
+        family: "order_flow"
+        formula: "MA_settlement(3) - MA_settlement(8)"
+        data_dependency: ["funding_8h"]
+        visibility: "scheduled"
+        window_type: "settlement_events"
+
+      - id: "oi_funding_divergence"
+        family: "order_flow"
+        formula: "sign(oi_change) != sign(funding)"
+        data_dependency: ["open_interest_5m", "funding_8h"]
+        visibility: "max(oi_visible, funding_visible)"
+        alignment: "asof_join"
+
+  # 层级2: 研究因子库 (仅用于研究)
+  research:
+    description: "研究因子库，用于因子研究和模型训练"
+    count: 180
+    location: "research/factors/"
+    promotion_rules:
+      - "Sharpe提升 > 5%"
+      - "IC均值 > 0.03"
+      - "与现有因子相关性 < 0.7"
+      - "3个月走势样本外验证通过"
+
+  # 层级3: 扩展因子库 (Phase 2)
+  extended:
+    description: "扩展因子库，需要额外数据源"
+    count: 21
+    categories:
+      - name: "L2深度因子"
+        count: 8
+        data_required: "order_book_l2"
+      - name: "清算因子"
+        count: 5
+        data_required: "liquidations"
+      - name: "跨所Basis"
+        count: 8
+        data_required: "multi_exchange"
+
+# ============================================================
+# 因子准入规则
+# ============================================================
+admission_rules:
+  # 必填信息
+  required_fields:
+    - "factor_id"
+    - "proposer"
+    - "date"
+    - "marginal_utility"
+    - "stability"
+    - "redundancy"
+    - "robustness"
+
+  # P3: 增量证明 (必须说明价值)
+  marginal_utility:
+    categories:
+      - "A"  # 收益提升
+      - "B"  # 风险控制
+      - "C"  # 执行一致性
+    evidence_required: true
+    backtest_report_required: true
+
+  # P5: 稳定性评估
+  stability:
+    min_history_days: 180  # 至少6个月历史
+    acceptable_tiers: ["A", "B"]  # C档不进MVP
+    max_schema_change_risk: "medium"
+
+  # P7: 冗余检查
+  redundancy:
+    max_correlation: 0.7  # 与现有因子相关性不超过0.7
+    check_method: "pearson"
+
+  # P8: 稳健性检查
+  robustness:
+    required_regimes:
+      - "trending"
+      - "ranging"
+      - "high_volatility"
+    min_positive_regimes: 3  # 所有regime都要正向
+
+# ============================================================
+# 因子族定义
+# ============================================================
+factor_families:
+  momentum:
+    description: "动量因子，捕捉价格趋势"
+    examples: ["return", "ma_cross", "breakout"]
+
+  volatility:
+    description: "波动率因子，衡量价格波动"
+    examples: ["atr", "realized_vol", "vol_regime"]
+
+  order_flow:
+    description: "订单流因子，分析资金流向"
+    examples: ["oi_change", "funding", "cvd"]
+
+  sentiment:
+    description: "情绪因子，市场情绪指标"
+    examples: ["fear_greed", "funding_rate"]
+
+  microstructure:
+    description: "微观结构因子，深度和流动性"
+    examples: ["spread", "depth_imbalance"]
+
+# ============================================================
+# 相关性阈值配置
+# ============================================================
+correlation_thresholds:
+  # 同族因子
+  within_family:
+    warning: 0.5
+    reject: 0.8
+
+  # 跨族因子
+  cross_family:
+    warning: 0.3
+    reject: 0.7
+
+# ============================================================
+# 因子计算时间约束
+# ============================================================
+time_constraints:
+  # 所有窗口以 bar 数量计
+  bar_frequency: "5min"
+  bars_per_day: 288
+  bars_per_hour: 12
+
+  # 常用窗口对照
+  window_mapping:
+    "1h": 12
+    "4h": 48
+    "1d": 288
+    "7d": 2016
+    "20d": 5760
+    "30d": 8640

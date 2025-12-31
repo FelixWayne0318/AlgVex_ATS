@@ -1,0 +1,203 @@
+# ============================================================
+# AlgVex MVP 范围配置
+# 文件: config/mvp_scope.yaml
+# 说明: 定义MVP阶段的边界和约束
+# ============================================================
+
+config_version: "1.0.0"
+config_hash: ""  # 自动计算
+
+# ============================================================
+# MVP 边界定义
+# ============================================================
+mvp_boundaries:
+  # A) 单一时间框架
+  timeframe:
+    primary: "5min"
+    description: "所有因子/信号/执行基于5分钟K线"
+    acceptance: "所有因子基于5m Bar计算"
+
+  # B) 有限标的
+  universe:
+    max_symbols: 50
+    initial_symbols:
+      - "BTCUSDT"
+      - "ETHUSDT"
+    expansion_rule: "按流动性排名添加Top-18"
+    acceptance: "初始20-50个永续合约"
+
+  # C) 每日Replay对齐
+  alignment:
+    enabled: true
+    tolerance: 0.001  # 0.1%
+    frequency: "daily"
+    acceptance: "Live vs Replay偏差 < 0.1%"
+
+  # D) 配置可追溯
+  traceability:
+    config_versioning: true
+    hash_validation: true
+    acceptance: "trace记录config_hash"
+
+# ============================================================
+# MVP 数据源 (最小集)
+# ============================================================
+mvp_data_sources:
+  - source_id: "klines_5m"
+    description: "5分钟K线 (OHLCV)"
+    visibility: "bar_close"
+    tier: "A"
+    required: true
+
+  - source_id: "open_interest_5m"
+    description: "5分钟持仓量快照"
+    visibility: "bar_close+5min"
+    tier: "B"
+    required: true
+
+  - source_id: "funding_8h"
+    description: "资金费率 (每8小时)"
+    visibility: "scheduled"
+    tier: "A"
+    required: true
+
+# ============================================================
+# MVP 因子 (11个)
+# ============================================================
+mvp_factors:
+  total: 11
+
+  momentum:
+    count: 5
+    factors:
+      - "return_5m"
+      - "return_1h"
+      - "ma_cross"
+      - "breakout_20d"
+      - "trend_strength"
+
+  volatility:
+    count: 3
+    factors:
+      - "atr_288"
+      - "realized_vol_1d"
+      - "vol_regime"
+
+  order_flow:
+    count: 3
+    factors:
+      - "oi_change_rate"
+      - "funding_momentum"
+      - "oi_funding_divergence"
+
+# ============================================================
+# MVP 模型配置
+# ============================================================
+mvp_model:
+  # 默认模型
+  default: "lightgbm"
+
+  # 可选模型
+  available:
+    - "lightgbm"
+    - "xgboost"
+    - "catboost"
+
+  # 模型训练配置
+  training:
+    walk_forward: true
+    train_window_days: 180
+    valid_window_days: 30
+    retrain_frequency: "weekly"
+
+# ============================================================
+# MVP 回测配置
+# ============================================================
+mvp_backtest:
+  # 初始资金
+  initial_capital: 100000  # USDT
+
+  # 策略配置
+  strategy:
+    type: "top_k_dropout"
+    topk: 10
+    n_drop: 3
+
+  # 成本配置
+  costs:
+    open_cost: 0.0004   # 0.04% 开仓手续费
+    close_cost: 0.0004  # 0.04% 平仓手续费
+    slippage: 0.0001    # 0.01% 滑点
+
+  # 杠杆配置
+  leverage:
+    max: 3
+    default: 1
+
+# ============================================================
+# MVP 风控配置
+# ============================================================
+mvp_risk:
+  # 仓位限制
+  position:
+    max_single_position: 0.1  # 单标的最大10%
+    max_total_exposure: 1.0   # 总敞口最大100%
+
+  # 止损
+  stop_loss:
+    enabled: true
+    threshold: 0.05  # 5%止损
+
+  # 日度限制
+  daily_limits:
+    max_drawdown: 0.03  # 日最大回撤3%
+    max_trades: 100     # 日最大交易次数
+
+# ============================================================
+# 功能开关
+# ============================================================
+feature_flags:
+  # MVP 阶段开启
+  mvp_enabled:
+    - "klines_collector"
+    - "oi_collector"
+    - "funding_collector"
+    - "mvp_factors"
+    - "lightgbm_model"
+    - "simple_backtest"
+    - "paper_trading"
+
+  # MVP 阶段关闭 (Phase 2+)
+  mvp_disabled:
+    - "l2_depth_collector"
+    - "liquidation_collector"
+    - "multi_exchange"
+    - "research_factors_180"
+    - "neural_network_models"
+    - "live_trading"
+
+# ============================================================
+# 验收标准
+# ============================================================
+acceptance_criteria:
+  # 数据层
+  data:
+    - "3个数据源采集正常运行"
+    - "数据完整性>99%"
+    - "可见性规则100%遵守"
+
+  # 因子层
+  factors:
+    - "11个MVP因子计算正确"
+    - "因子IC均值>0.02"
+    - "无未来信息泄露"
+
+  # 模型层
+  model:
+    - "模型可正常训练和预测"
+    - "回测Sharpe>1.0"
+
+  # 对齐层
+  alignment:
+    - "连续7天Replay对齐通过"
+    - "信号差异<0.1%"
