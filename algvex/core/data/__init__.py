@@ -154,3 +154,38 @@ except ImportError:
     CustomReweighter = None
     get_default_reweighter = None
     get_crypto_reweighter = None
+
+# 缓存模块 (Qlib 风格)
+try:
+    from .cache import (
+        MemCache,
+        MemCacheExpire,
+        DiskCache,
+        RedisCache,
+        MultiLevelCache,
+        DatasetCache,
+        get_mem_cache,
+        clear_mem_cache,
+        REDIS_AVAILABLE,
+    )
+    __all__.extend([
+        "MemCache",
+        "MemCacheExpire",
+        "DiskCache",
+        "RedisCache",
+        "MultiLevelCache",
+        "DatasetCache",
+        "get_mem_cache",
+        "clear_mem_cache",
+        "REDIS_AVAILABLE",
+    ])
+except ImportError:
+    MemCache = None
+    MemCacheExpire = None
+    DiskCache = None
+    RedisCache = None
+    MultiLevelCache = None
+    DatasetCache = None
+    get_mem_cache = None
+    clear_mem_cache = None
+    REDIS_AVAILABLE = False
