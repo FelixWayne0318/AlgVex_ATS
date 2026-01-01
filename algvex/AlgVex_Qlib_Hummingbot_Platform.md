@@ -85,12 +85,33 @@ predictions = model.predict(dataset)
 
 ```python
 from algvex.core.execution.exchange_connectors import (
-    BinancePerpetualConnector, BybitPerpetualConnector
+    BinancePerpetualConnector, BybitPerpetualConnector,
+    ExchangeConfig, ExchangeType, OrderRequest, OrderSide, OrderType
+)
+from decimal import Decimal
+
+# 创建配置
+config = ExchangeConfig(
+    exchange_type=ExchangeType.BINANCE_PERPETUAL,
+    api_key="your_api_key",
+    api_secret="your_api_secret",
+    testnet=True  # 使用测试网
 )
 
-connector = BinancePerpetualConnector(api_key, api_secret)
+# 创建连接器
+connector = BinancePerpetualConnector(config)
 await connector.connect()
-order = await connector.create_order(OrderRequest(...))
+
+# 创建订单
+order_request = OrderRequest(
+    symbol="BTCUSDT",
+    side=OrderSide.BUY,
+    order_type=OrderType.MARKET,
+    quantity=Decimal("0.01")
+)
+order = await connector.create_order(order_request)
+
+# 查询持仓
 positions = await connector.get_positions()
 ```
 
@@ -108,14 +129,29 @@ positions = await connector.get_positions()
 
 ```python
 from algvex.core.execution.executors import TWAPExecutor, GridExecutor
+from algvex.core.execution.exchange_connectors import OrderSide
+from decimal import Decimal
 
 # TWAP 执行
-executor = TWAPExecutor(connector, OrderRequest(...), duration=3600, slices=12)
+executor = TWAPExecutor(
+    connector=connector,
+    symbol="BTCUSDT",
+    side=OrderSide.BUY,
+    total_quantity=Decimal("0.1"),
+    duration_minutes=60,
+    num_slices=12
+)
 result = await executor.execute()
 
 # 网格交易
-executor = GridExecutor(connector, symbol, total_amount=10000, 
-                        lower_price=40000, upper_price=45000, grids=10)
+executor = GridExecutor(
+    connector=connector,
+    symbol="BTCUSDT",
+    total_quantity=Decimal("1.0"),
+    lower_price=Decimal("40000"),
+    upper_price=Decimal("45000"),
+    num_grids=10
+)
 result = await executor.execute()
 ```
 

@@ -13,7 +13,7 @@ AlgVex Production - 生产环境模块
 - signal_generator: 信号生成器
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 # 边界检查：禁止导入 research 模块
 def _check_import_boundary():

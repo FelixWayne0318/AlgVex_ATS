@@ -73,6 +73,24 @@ class PositionSide(Enum):
     BOTH = "both"  # 单向持仓模式
 
 
+class ExchangeAPIError(Exception):
+    """交易所 API 错误"""
+    def __init__(self, message: str, status_code: int = 0, response: Any = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response = response
+
+
+class ConnectionError(Exception):
+    """连接错误"""
+    pass
+
+
+class OrderError(Exception):
+    """订单相关错误"""
+    pass
+
+
 @dataclass
 class ExchangeConfig:
     """交易所配置"""
@@ -198,7 +216,7 @@ class BaseExchangeConnector(ABC):
             self._is_connected = True
             logger.info(f"Connected to {self.config.exchange_type.value}")
             return True
-        except Exception as e:
+        except (aiohttp.ClientError, asyncio.TimeoutError, ExchangeAPIError) as e:
             logger.error(f"Connection failed: {e}")
             return False
 
@@ -251,7 +269,11 @@ class BaseExchangeConnector(ABC):
             ) as response:
                 result = await response.json()
                 if response.status >= 400:
-                    raise Exception(f"API Error: {result}")
+                    raise ExchangeAPIError(
+                        f"API Error: {result}",
+                        status_code=response.status,
+                        response=result
+                    )
                 return result
 
     # ============== 交易接口 ==============
@@ -416,6 +438,19 @@ class BinancePerpetualConnector(BaseExchangeConnector):
         }
         return mapping.get(status, OrderStatus.PENDING)
 
+    def _reverse_convert_order_type(self, order_type_str: str) -> OrderType:
+        """从 API 返回的订单类型字符串转换为 OrderType 枚举"""
+        mapping = {
+            "MARKET": OrderType.MARKET,
+            "LIMIT": OrderType.LIMIT,
+            "STOP_MARKET": OrderType.STOP_MARKET,
+            "STOP": OrderType.STOP_LIMIT,
+            "TAKE_PROFIT_MARKET": OrderType.TAKE_PROFIT_MARKET,
+            "TAKE_PROFIT": OrderType.TAKE_PROFIT_LIMIT,
+            "TRAILING_STOP_MARKET": OrderType.TRAILING_STOP,
+        }
+        return mapping.get(order_type_str, OrderType.LIMIT)
+
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
         params = {
             "symbol": symbol.upper().replace("-", "").replace("/", ""),
@@ -424,7 +459,7 @@ class BinancePerpetualConnector(BaseExchangeConnector):
         try:
             await self._request("DELETE", "/fapi/v1/order", params=params, signed=True)
             return True
-        except Exception as e:
+        except (ExchangeAPIError, aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f"Cancel order failed: {e}")
             return False
 
@@ -440,7 +475,7 @@ class BinancePerpetualConnector(BaseExchangeConnector):
             client_order_id=result.get("clientOrderId", ""),
             symbol=result["symbol"],
             side=OrderSide(result["side"].lower()),
-            order_type=OrderType.LIMIT,  # 简化
+            order_type=self._reverse_convert_order_type(result.get("type", "LIMIT")),
             status=self._convert_order_status(result["status"]),
             quantity=Decimal(result["origQty"]),
             filled_quantity=Decimal(result.get("executedQty", "0")),
@@ -463,7 +498,7 @@ class BinancePerpetualConnector(BaseExchangeConnector):
                 client_order_id=r.get("clientOrderId", ""),
                 symbol=r["symbol"],
                 side=OrderSide(r["side"].lower()),
-                order_type=OrderType.LIMIT,
+                order_type=self._reverse_convert_order_type(r.get("type", "LIMIT")),
                 status=self._convert_order_status(r["status"]),
                 quantity=Decimal(r["origQty"]),
                 filled_quantity=Decimal(r.get("executedQty", "0")),
@@ -507,7 +542,7 @@ class BinancePerpetualConnector(BaseExchangeConnector):
         try:
             await self._request("POST", "/fapi/v1/leverage", params=params, signed=True)
             return True
-        except Exception as e:
+        except (ExchangeAPIError, aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f"Set leverage failed: {e}")
             return False
 
@@ -519,10 +554,13 @@ class BinancePerpetualConnector(BaseExchangeConnector):
         try:
             await self._request("POST", "/fapi/v1/marginType", params=params, signed=True)
             return True
-        except Exception as e:
+        except ExchangeAPIError as e:
             # 可能已经是该模式
             if "No need to change margin type" in str(e):
                 return True
+            logger.error(f"Set margin type failed: {e}")
+            return False
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f"Set margin type failed: {e}")
             return False
 
@@ -643,7 +681,7 @@ class BybitPerpetualConnector(BaseExchangeConnector):
         try:
             await self._request("POST", "/v5/order/cancel", data=data, signed=True)
             return True
-        except Exception as e:
+        except (ExchangeAPIError, aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f"Cancel order failed: {e}")
             return False
 
@@ -744,7 +782,7 @@ class BybitPerpetualConnector(BaseExchangeConnector):
         try:
             await self._request("POST", "/v5/position/set-leverage", data=data, signed=True)
             return True
-        except Exception as e:
+        except (ExchangeAPIError, aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f"Set leverage failed: {e}")
             return False
 
@@ -760,7 +798,7 @@ class BybitPerpetualConnector(BaseExchangeConnector):
         try:
             await self._request("POST", "/v5/position/switch-isolated", data=data, signed=True)
             return True
-        except Exception as e:
+        except (ExchangeAPIError, aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f"Set margin type failed: {e}")
             return False
 

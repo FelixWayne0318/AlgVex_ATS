@@ -13,6 +13,7 @@ AlgVex 策略执行器
 
 import asyncio
 import logging
+import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -203,6 +204,16 @@ class TWAPExecutor(BaseExecutor):
         randomize: bool = True,
         max_deviation: float = 0.1,  # 随机偏差范围
     ):
+        # 输入验证
+        if num_slices < 1:
+            raise ValueError(f"num_slices must be >= 1, got {num_slices}")
+        if duration_minutes < 1:
+            raise ValueError(f"duration_minutes must be >= 1, got {duration_minutes}")
+        if total_quantity <= 0:
+            raise ValueError(f"total_quantity must be > 0, got {total_quantity}")
+        if max_deviation < 0 or max_deviation > 1:
+            raise ValueError(f"max_deviation must be in [0, 1], got {max_deviation}")
+
         super().__init__(connector, symbol, side, total_quantity)
         self.duration_minutes = duration_minutes
         self.num_slices = num_slices
@@ -236,7 +247,6 @@ class TWAPExecutor(BaseExecutor):
 
             # 添加随机性
             if self.randomize and i < self.num_slices - 1:
-                import random
                 deviation = random.uniform(-self.max_deviation, self.max_deviation)
                 qty = qty * Decimal(str(1 + deviation))
                 qty = min(qty, self.remaining_quantity)
@@ -254,7 +264,6 @@ class TWAPExecutor(BaseExecutor):
                 # 添加随机延迟
                 delay = interval_seconds
                 if self.randomize:
-                    import random
                     delay *= random.uniform(0.8, 1.2)
                 await asyncio.sleep(delay)
 
@@ -366,6 +375,20 @@ class GridExecutor(BaseExecutor):
         num_grids: int = 10,
         grid_type: str = "arithmetic",  # arithmetic or geometric
     ):
+        # 输入验证
+        if num_grids < 2:
+            raise ValueError(f"num_grids must be >= 2, got {num_grids}")
+        if lower_price <= 0:
+            raise ValueError(f"lower_price must be > 0, got {lower_price}")
+        if upper_price <= 0:
+            raise ValueError(f"upper_price must be > 0, got {upper_price}")
+        if lower_price >= upper_price:
+            raise ValueError(f"lower_price ({lower_price}) must be < upper_price ({upper_price})")
+        if total_quantity <= 0:
+            raise ValueError(f"total_quantity must be > 0, got {total_quantity}")
+        if grid_type not in ("arithmetic", "geometric"):
+            raise ValueError(f"grid_type must be 'arithmetic' or 'geometric', got '{grid_type}'")
+
         # Grid 是双向的，side 设为 BUY 作为默认
         super().__init__(connector, symbol, OrderSide.BUY, total_quantity)
         self.lower_price = lower_price
