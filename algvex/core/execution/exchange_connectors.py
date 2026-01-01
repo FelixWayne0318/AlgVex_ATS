@@ -449,7 +449,11 @@ class BinancePerpetualConnector(BaseExchangeConnector):
             "TAKE_PROFIT": OrderType.TAKE_PROFIT_LIMIT,
             "TRAILING_STOP_MARKET": OrderType.TRAILING_STOP,
         }
-        return mapping.get(order_type_str, OrderType.LIMIT)
+        result = mapping.get(order_type_str)
+        if result is None:
+            logger.warning(f"Unknown order type '{order_type_str}', defaulting to LIMIT")
+            return OrderType.LIMIT
+        return result
 
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
         params = {

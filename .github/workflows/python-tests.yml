@@ -58,17 +58,29 @@ jobs:
       - name: Run config validator tests
         run: |
           cd algvex
-          python -m pytest tests/test_config_validator.py -v --tb=short || true
+          if [ -f tests/test_config_validator.py ]; then
+            python -m pytest tests/test_config_validator.py -v --tb=short
+          else
+            echo "⚠️ test_config_validator.py not found, skipping"
+          fi
 
       - name: Run factor engine tests
         run: |
           cd algvex
-          python -m pytest tests/test_factor_engine.py -v --tb=short || true
+          if [ -f tests/test_factor_engine.py ]; then
+            python -m pytest tests/test_factor_engine.py -v --tb=short
+          else
+            echo "⚠️ test_factor_engine.py not found, skipping"
+          fi
 
       - name: Run P0 tests (critical path)
         run: |
           cd algvex
-          python -m pytest tests/p0/ -v --tb=short || true
+          if [ -d tests/p0 ] && [ "$(ls -A tests/p0/*.py 2>/dev/null)" ]; then
+            python -m pytest tests/p0/ -v --tb=short
+          else
+            echo "⚠️ No P0 tests found in tests/p0/, skipping"
+          fi
 
   visibility-check:
     runs-on: ubuntu-latest
