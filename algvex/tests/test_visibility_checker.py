@@ -96,11 +96,14 @@ class TestVisibilityChecker:
         signal_time = datetime(2024, 1, 1, 10, 5, 0)
 
         # K线数据可用时间
+        # v1.1.0修正: safety_margin = 0s，所以 klines_usable = signal_time
         klines_usable = self.checker.get_usable_data_time("klines_5m", signal_time)
-        assert klines_usable < signal_time
+        assert klines_usable == signal_time  # bar_close 数据在 signal_time 精确可用
 
         # OI数据可用时间（有5分钟延迟）
         oi_usable = self.checker.get_usable_data_time("open_interest_5m", signal_time)
+        expected_oi_time = datetime(2024, 1, 1, 10, 0, 0)  # 10:05 - 5min = 10:00
+        assert oi_usable == expected_oi_time
         assert oi_usable < klines_usable  # OI可用时间更早
 
     def test_visibility_result_structure(self):
