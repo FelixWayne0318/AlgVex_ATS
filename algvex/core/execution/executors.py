@@ -228,6 +228,7 @@ class TWAPExecutor(BaseExecutor):
         # 计算每次下单数量和间隔
         slice_quantity = self.total_quantity / self.num_slices
         interval_seconds = (self.duration_minutes * 60) / self.num_slices
+        total_duration_seconds = self.duration_minutes * 60
 
         logger.info(
             f"TWAP started: {self.symbol} {self.side.value} "
@@ -261,11 +262,27 @@ class TWAPExecutor(BaseExecutor):
 
             # 等待下一次
             if i < self.num_slices - 1 and self.remaining_quantity > 0:
-                # 添加随机延迟
-                delay = interval_seconds
-                if self.randomize:
-                    delay *= random.uniform(0.8, 1.2)
-                await asyncio.sleep(delay)
+                # 计算已用时间和剩余时间
+                elapsed = (datetime.now() - self._start_time).total_seconds()
+                remaining_time = total_duration_seconds - elapsed
+                remaining_slices = self.num_slices - i - 1
+
+                if remaining_time > 0 and remaining_slices > 0:
+                    # 基础延迟 = 剩余时间 / 剩余切片数
+                    base_delay = remaining_time / remaining_slices
+
+                    # 添加随机延迟，但确保不超过剩余时间
+                    if self.randomize:
+                        delay = base_delay * random.uniform(0.8, 1.2)
+                        # 确保不会导致总时间超过 duration
+                        delay = min(delay, remaining_time / remaining_slices * 1.1)
+                    else:
+                        delay = base_delay
+
+                    await asyncio.sleep(delay)
+                else:
+                    # 时间已用尽，快速完成剩余订单
+                    await asyncio.sleep(0.1)
 
         self._status = ExecutorStatus.COMPLETED
         self._end_time = datetime.now()
