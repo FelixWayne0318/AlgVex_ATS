@@ -3,8 +3,8 @@
 > **Qlib + Hummingbot 融合的专业加密货币量化交易平台**
 >
 > 网站: algvex.com
-> 版本: 5.1.0
-> 更新: 2025-12-23
+> 版本: 2.0.0
+> 更新: 2025-12-31
 >
 > **v3.10.0 更新**: 完善 Hummingbot 执行层集成设计，新增 Iteration-4 交付计划
 
@@ -43,6 +43,91 @@
 - [11. P0 验收标准](#11-p0-验收标准-上线前必须完成)
 - [12. 开发路线图](#12-开发路线图)
 - [文档总结](#文档总结)
+
+---
+
+## 📋 v2.0.0 更新日志 (2025-12-31)
+
+### 🆕 重大更新: Qlib + Hummingbot 完整功能实现
+
+#### 1. Qlib 模型封装层 (`research/qlib_models.py`)
+
+完整封装 Qlib 0.9.7 所有 25+ 模型:
+
+| 模型类别 | 模型列表 |
+|----------|----------|
+| **GBDT** | LightGBM, XGBoost, CatBoost |
+| **线性模型** | Linear, Ridge, Lasso |
+| **基础DL** | LSTM, GRU, MLP, TCN |
+| **高级DL** | Transformer, ALSTM, TabNet, GATS, SFM, HIST, TRA |
+| **集成模型** | DoubleEnsemble |
+| **其他** | GAT, IGMTF, ADD, ADARNN, TCTS, Localformer |
+
+```python
+from algvex.research.qlib_models import ModelFactory, ModelType
+
+# 创建模型
+model = ModelFactory.create(ModelType.TRANSFORMER, d_model=64, n_heads=8)
+model.fit(dataset)
+predictions = model.predict(dataset)
+```
+
+#### 2. 交易所连接器 (`core/execution/exchange_connectors.py`)
+
+支持多交易所永续合约交易:
+
+| 交易所 | 功能 |
+|--------|------|
+| **Binance Perpetual** | 订单、持仓、账户、K线、资金费率 |
+| **Bybit Perpetual** | 订单、持仓、账户、K线、资金费率 |
+| **OKX** (预留) | 架构已支持 |
+| **Gate.io** (预留) | 架构已支持 |
+
+```python
+from algvex.core.execution.exchange_connectors import (
+    BinancePerpetualConnector, BybitPerpetualConnector
+)
+
+connector = BinancePerpetualConnector(api_key, api_secret)
+await connector.connect()
+order = await connector.create_order(OrderRequest(...))
+positions = await connector.get_positions()
+```
+
+#### 3. 执行策略 (`core/execution/executors.py`)
+
+实现 5 种专业执行算法:
+
+| 策略 | 说明 | 用途 |
+|------|------|------|
+| **TWAP** | 时间加权平均价格 | 大单拆分，减少冲击 |
+| **VWAP** | 成交量加权平均价格 | 跟踪市场成交分布 |
+| **Grid** | 网格交易 | 震荡行情盈利 |
+| **DCA** | 定投策略 | 分批建仓 |
+| **Iceberg** | 冰山订单 | 隐藏大单意图 |
+
+```python
+from algvex.core.execution.executors import TWAPExecutor, GridExecutor
+
+# TWAP 执行
+executor = TWAPExecutor(connector, OrderRequest(...), duration=3600, slices=12)
+result = await executor.execute()
+
+# 网格交易
+executor = GridExecutor(connector, symbol, total_amount=10000, 
+                        lower_price=40000, upper_price=45000, grids=10)
+result = await executor.execute()
+```
+
+#### 4. HummingbotBridge v2.0.0 重写
+
+完全重写的执行桥接层:
+
+- 多交易所支持
+- 多执行策略支持
+- 异步订单管理
+- 自动重连机制
+- 完整的状态同步
 
 ---
 
@@ -4927,13 +5012,16 @@ algvex/
 │   │   └── engine.py               # 因子计算引擎
 │   ├── model/                      # 模型层
 │   │   ├── __init__.py
+│   │   ├── qlib_models.py          # Qlib模型集成 (v2.0.0新增)
 │   │   └── trainer.py              # ML模型训练
 │   ├── backtest/                   # 回测层
 │   │   ├── __init__.py
 │   │   └── engine.py               # 永续合约回测
 │   ├── execution/                  # 执行层
 │   │   ├── __init__.py
-│   │   ├── hummingbot_bridge.py    # Hummingbot桥接
+│   │   ├── exchange_connectors.py  # 多交易所连接器 (v2.0.0新增)
+│   │   ├── executors.py            # 执行策略 TWAP/VWAP/Grid (v2.0.0新增)
+│   │   ├── hummingbot_bridge.py    # Hummingbot桥接 (v2.0.0重写)
 │   │   ├── risk_manager.py         # 风控管理
 │   │   └── position_manager.py     # 仓位管理
 │   └── strategy/                   # 策略层
@@ -9008,4 +9096,4 @@ class TestConsensus:
 
 ---
 
-*文档版本: v5.1.0 | 更新于 2025-12-22*
+*文档版本: v2.0.0 | 更新于 2025-12-31*
