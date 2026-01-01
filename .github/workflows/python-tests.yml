@@ -50,36 +50,35 @@ jobs:
             pip install -r algvex/requirements.txt || true
           fi
 
-      - name: Run visibility tests
+      - name: Install algvex package
         run: |
-          cd algvex
-          python -m pytest tests/test_visibility_checker.py -v --tb=short
+          pip install -e .
+
+      - name: Run visibility tests
+        run: python -m pytest algvex/tests/test_visibility_checker.py -v --tb=short
 
       - name: Run config validator tests
         run: |
-          cd algvex
-          if [ -f tests/test_config_validator.py ]; then
-            python -m pytest tests/test_config_validator.py -v --tb=short
+          if [ -f algvex/tests/test_config_validator.py ]; then
+            python -m pytest algvex/tests/test_config_validator.py -v --tb=short
           else
             echo "⚠️ test_config_validator.py not found, skipping"
           fi
 
       - name: Run factor engine tests
         run: |
-          cd algvex
-          if [ -f tests/test_factor_engine.py ]; then
-            python -m pytest tests/test_factor_engine.py -v --tb=short
+          if [ -f algvex/tests/test_factor_engine.py ]; then
+            python -m pytest algvex/tests/test_factor_engine.py -v --tb=short
           else
             echo "⚠️ test_factor_engine.py not found, skipping"
           fi
 
       - name: Run P0 tests (critical path)
         run: |
-          cd algvex
-          if [ -d tests/p0 ] && [ "$(ls -A tests/p0/*.py 2>/dev/null)" ]; then
-            python -m pytest tests/p0/ -v --tb=short
+          if [ -d algvex/tests/p0 ] && [ "$(ls -A algvex/tests/p0/*.py 2>/dev/null)" ]; then
+            python -m pytest algvex/tests/p0/ -v --tb=short
           else
-            echo "⚠️ No P0 tests found in tests/p0/, skipping"
+            echo "⚠️ No P0 tests found in algvex/tests/p0/, skipping"
           fi
 
   visibility-check:
@@ -137,16 +136,20 @@ jobs:
           echo "Checking import boundaries..."
 
           # 检查 production 目录不导入 qlib
-          if grep -r "import qlib" algvex/production/ 2>/dev/null; then
+          qlib_imports=$(find algvex/production/ -name "*.py" -type f -exec grep -l "import qlib\|from qlib" {} \; 2>/dev/null || true)
+          if [ -n "$qlib_imports" ]; then
             echo "❌ production/ should not import qlib"
+            echo "$qlib_imports"
             exit 1
           else
             echo "✅ production/ does not import qlib"
           fi
 
           # 检查 production 目录不导入 research
-          if grep -r "from algvex.research" algvex/production/ 2>/dev/null; then
+          research_imports=$(find algvex/production/ -name "*.py" -type f -exec grep -l "from algvex.research" {} \; 2>/dev/null || true)
+          if [ -n "$research_imports" ]; then
             echo "❌ production/ should not import from research/"
+            echo "$research_imports"
             exit 1
           else
             echo "✅ production/ does not import from research/"
