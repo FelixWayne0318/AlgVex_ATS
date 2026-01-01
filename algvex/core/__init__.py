@@ -87,6 +87,22 @@ def __getattr__(name):
     elif name == "generate_report":
         from .evaluate import generate_report
         return generate_report
+    # 强化学习模块 (Qlib 风格)
+    elif name == "TradingEnv":
+        from .rl.env import TradingEnv
+        return TradingEnv
+    elif name == "CryptoTradingEnv":
+        from .rl.env import CryptoTradingEnv
+        return CryptoTradingEnv
+    elif name == "PPOPolicy":
+        from .rl.policy import PPOPolicy
+        return PPOPolicy
+    elif name == "DQNPolicy":
+        from .rl.policy import DQNPolicy
+        return DQNPolicy
+    elif name == "Trainer":
+        from .rl.trainer import Trainer
+        return Trainer
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
@@ -108,4 +124,10 @@ __all__ = [
     "calc_long_short_return",
     "calc_long_short_prec",
     "generate_report",
+    # 强化学习模块 (Qlib 风格)
+    "TradingEnv",
+    "CryptoTradingEnv",
+    "PPOPolicy",
+    "DQNPolicy",
+    "Trainer",
 ]

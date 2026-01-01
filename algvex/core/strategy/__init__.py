@@ -46,6 +46,16 @@ from .risk_manager import (
     create_aggressive_risk_manager,
 )
 
+# 投资组合优化 (Qlib 风格)
+from .portfolio_optimizer import (
+    OptMethod,
+    PortfolioOptimizer,
+    RiskModel,
+    TopkDropoutStrategy,
+    optimize_portfolio,
+    calculate_portfolio_metrics,
+)
+
 __all__ = [
     # Signal Generator
     "SignalGenerator",
@@ -69,4 +79,11 @@ __all__ = [
     "create_conservative_risk_manager",
     "create_moderate_risk_manager",
     "create_aggressive_risk_manager",
+    # 投资组合优化
+    "OptMethod",
+    "PortfolioOptimizer",
+    "RiskModel",
+    "TopkDropoutStrategy",
+    "optimize_portfolio",
+    "calculate_portfolio_metrics",
 ]

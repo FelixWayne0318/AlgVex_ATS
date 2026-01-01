@@ -126,11 +126,16 @@ class CryptoDataset:
         # 获取训练数据
         train_data = self._get_segment_data(segment)
 
-        # 依次拟合处理器
-        current_data = train_data.copy()
-        for processor in self.processors:
-            processor.fit(current_data)
-            current_data = processor.transform(current_data)
+        # 检查是否是 ProcessorChain 对象
+        if hasattr(self.processors, 'fit') and hasattr(self.processors, 'transform'):
+            # ProcessorChain 对象，直接调用 fit
+            self.processors.fit(train_data)
+        else:
+            # 列表形式，依次拟合处理器
+            current_data = train_data.copy()
+            for processor in self.processors:
+                processor.fit(current_data)
+                current_data = processor.transform(current_data)
 
         self._is_fitted = True
         logger.info(f"Processors fitted on '{segment}' segment ({len(train_data)} rows)")
@@ -153,12 +158,19 @@ class CryptoDataset:
             return data
 
         result = data.copy()
-        for processor in self.processors:
-            # 检查是否适用于推理
-            if for_inference and hasattr(processor, 'is_for_infer'):
-                if not processor.is_for_infer():
-                    continue
-            result = processor.transform(result)
+
+        # 检查是否是 ProcessorChain 对象
+        if hasattr(self.processors, 'transform'):
+            # ProcessorChain 对象，直接调用 transform
+            result = self.processors.transform(result, for_inference=for_inference) if hasattr(self.processors.transform, '__code__') and 'for_inference' in self.processors.transform.__code__.co_varnames else self.processors.transform(result)
+        else:
+            # 列表形式，依次应用处理器
+            for processor in self.processors:
+                # 检查是否适用于推理
+                if for_inference and hasattr(processor, 'is_for_infer'):
+                    if not processor.is_for_infer():
+                        continue
+                result = processor.transform(result)
 
         return result
 
@@ -249,9 +261,17 @@ class CryptoDataset:
             print(f"  {name}: {info['rows']:,} rows ({info['start']} ~ {info['end']})")
 
         if self.processors:
-            print(f"\nProcessors: {len(self.processors)}")
-            for p in self.processors:
-                print(f"  - {type(p).__name__}")
+            # 检查是否是 ProcessorChain 对象
+            if hasattr(self.processors, 'processors'):
+                # ProcessorChain 对象
+                print(f"\nProcessors: {len(self.processors.processors)} (ProcessorChain)")
+                for p in self.processors.processors:
+                    print(f"  - {type(p).__name__}")
+            else:
+                # 列表形式
+                print(f"\nProcessors: {len(self.processors)}")
+                for p in self.processors:
+                    print(f"  - {type(p).__name__}")
 
         if self.reweighter:
             print(f"\nReweighter: {type(self.reweighter).__name__}")

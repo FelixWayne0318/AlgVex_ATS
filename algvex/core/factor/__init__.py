@@ -100,6 +100,25 @@ from .alpha158 import (
     compute_alpha158,
 )
 
+# 因子分析工具 (Qlib 风格)
+from .analysis import (
+    ICResult,
+    FactorReport,
+    FactorAnalyzer,
+    risk_analysis,
+    print_risk_analysis,
+    calc_ic,
+    generate_factor_report,
+)
+
+# 表达式引擎 (Qlib 风格)
+from .expression import (
+    Expression,
+    Feature,
+    Operators,
+    ExpressionParser,
+)
+
 # 处理器 (Qlib 风格)
 from .processor import (
     BaseProcessor,
@@ -203,6 +222,19 @@ __all__ = [
     "get_default_learn_processors",
     "get_default_infer_processors",
     "get_crypto_processors",
+    # 因子分析工具
+    "ICResult",
+    "FactorReport",
+    "FactorAnalyzer",
+    "risk_analysis",
+    "print_risk_analysis",
+    "calc_ic",
+    "generate_factor_report",
+    # 表达式引擎
+    "Expression",
+    "Feature",
+    "Operators",
+    "ExpressionParser",
 ]
 
 
