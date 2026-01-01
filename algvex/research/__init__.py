@@ -13,7 +13,7 @@ AlgVex Research - 研究环境模块
 - backtest_research: 回测研究工具
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 # 尝试导入 Qlib（研究环境可用）
 try:
