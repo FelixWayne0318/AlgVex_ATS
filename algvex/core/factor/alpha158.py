@@ -426,8 +426,12 @@ class Alpha158Calculator:
         计算 ROLLING 因子 (28种 × 5窗口 = 140个)
 
         基于滚动窗口的技术指标
+
+        优化: 使用字典收集所有因子，最后一次性用 pd.concat 合并
+        避免 DataFrame 碎片化警告
         """
-        factors = pd.DataFrame(index=df.index)
+        # 使用字典收集所有因子，避免逐列赋值导致的碎片化
+        factor_dict = {}
 
         c = df['close']
         h = df['high']
@@ -444,111 +448,111 @@ class Alpha158Calculator:
         # ROC - 收益率
         if use('ROC'):
             for w in windows:
-                factors[f'ROC{w}'] = self.ops.ref(c, w) / (c + self.EPS)
+                factor_dict[f'ROC{w}'] = self.ops.ref(c, w) / (c + self.EPS)
 
         # MA - 简单移动平均
         if use('MA'):
             for w in windows:
-                factors[f'MA{w}'] = self.ops.mean(c, w) / (c + self.EPS)
+                factor_dict[f'MA{w}'] = self.ops.mean(c, w) / (c + self.EPS)
 
         # STD - 标准差
         if use('STD'):
             for w in windows:
-                factors[f'STD{w}'] = self.ops.std(c, w) / (c + self.EPS)
+                factor_dict[f'STD{w}'] = self.ops.std(c, w) / (c + self.EPS)
 
         # BETA - 线性回归斜率
         if use('BETA'):
             for w in windows:
-                factors[f'BETA{w}'] = self.ops.slope(c, w) / (c + self.EPS)
+                factor_dict[f'BETA{w}'] = self.ops.slope(c, w) / (c + self.EPS)
 
         # RSQR - R²
         if use('RSQR'):
             for w in windows:
-                factors[f'RSQR{w}'] = self.ops.rsquare(c, w)
+                factor_dict[f'RSQR{w}'] = self.ops.rsquare(c, w)
 
         # RESI - 回归残差
         if use('RESI'):
             for w in windows:
-                factors[f'RESI{w}'] = self.ops.resi(c, w) / (c + self.EPS)
+                factor_dict[f'RESI{w}'] = self.ops.resi(c, w) / (c + self.EPS)
 
         # MAX - 最高价
         if use('MAX'):
             for w in windows:
-                factors[f'MAX{w}'] = self.ops.max(h, w) / (c + self.EPS)
+                factor_dict[f'MAX{w}'] = self.ops.max(h, w) / (c + self.EPS)
 
         # MIN - 最低价
         if use('MIN'):
             for w in windows:
-                factors[f'MIN{w}'] = self.ops.min(l, w) / (c + self.EPS)
+                factor_dict[f'MIN{w}'] = self.ops.min(l, w) / (c + self.EPS)
 
         # QTLU - 80%分位数
         if use('QTLU'):
             for w in windows:
-                factors[f'QTLU{w}'] = self.ops.quantile(c, w, 0.8) / (c + self.EPS)
+                factor_dict[f'QTLU{w}'] = self.ops.quantile(c, w, 0.8) / (c + self.EPS)
 
         # QTLD - 20%分位数
         if use('QTLD'):
             for w in windows:
-                factors[f'QTLD{w}'] = self.ops.quantile(c, w, 0.2) / (c + self.EPS)
+                factor_dict[f'QTLD{w}'] = self.ops.quantile(c, w, 0.2) / (c + self.EPS)
 
         # RANK - 百分位排名
         if use('RANK'):
             for w in windows:
-                factors[f'RANK{w}'] = self.ops.rank(c, w)
+                factor_dict[f'RANK{w}'] = self.ops.rank(c, w)
 
         # RSV - 相对强弱值 (类似KDJ)
         if use('RSV'):
             for w in windows:
                 min_low = self.ops.min(l, w)
                 max_high = self.ops.max(h, w)
-                factors[f'RSV{w}'] = (c - min_low) / (max_high - min_low + self.EPS)
+                factor_dict[f'RSV{w}'] = (c - min_low) / (max_high - min_low + self.EPS)
 
         # IMAX - 最大值位置
         if use('IMAX'):
             for w in windows:
-                factors[f'IMAX{w}'] = self.ops.idxmax(h, w) / w
+                factor_dict[f'IMAX{w}'] = self.ops.idxmax(h, w) / w
 
         # IMIN - 最小值位置
         if use('IMIN'):
             for w in windows:
-                factors[f'IMIN{w}'] = self.ops.idxmin(l, w) / w
+                factor_dict[f'IMIN{w}'] = self.ops.idxmin(l, w) / w
 
         # IMXD - 最大最小值位置差
         if use('IMXD'):
             for w in windows:
-                factors[f'IMXD{w}'] = (self.ops.idxmax(h, w) - self.ops.idxmin(l, w)) / w
+                factor_dict[f'IMXD{w}'] = (self.ops.idxmax(h, w) - self.ops.idxmin(l, w)) / w
 
         # CORR - 价量相关性
         if use('CORR'):
             log_v = np.log(v + 1)
             for w in windows:
-                factors[f'CORR{w}'] = self.ops.corr(c, log_v, w)
+                factor_dict[f'CORR{w}'] = self.ops.corr(c, log_v, w)
 
         # CORD - 价量变化相关性
         if use('CORD'):
             c_ret = c / self.ops.ref(c, 1)
             v_ret = np.log(v / self.ops.ref(v, 1) + 1)
             for w in windows:
-                factors[f'CORD{w}'] = self.ops.corr(c_ret, v_ret, w)
+                factor_dict[f'CORD{w}'] = self.ops.corr(c_ret, v_ret, w)
 
         # CNTP - 上涨天数占比
         if use('CNTP'):
             up = (c > self.ops.ref(c, 1)).astype(float)
             for w in windows:
-                factors[f'CNTP{w}'] = self.ops.mean(up, w)
+                factor_dict[f'CNTP{w}'] = self.ops.mean(up, w)
 
         # CNTN - 下跌天数占比
         if use('CNTN'):
             down = (c < self.ops.ref(c, 1)).astype(float)
             for w in windows:
-                factors[f'CNTN{w}'] = self.ops.mean(down, w)
+                factor_dict[f'CNTN{w}'] = self.ops.mean(down, w)
 
         # CNTD - 涨跌天数差
         if use('CNTD'):
             up = (c > self.ops.ref(c, 1)).astype(float)
             down = (c < self.ops.ref(c, 1)).astype(float)
             for w in windows:
-                factors[f'CNTD{w}'] = self.ops.mean(up, w) - self.ops.mean(down, w)
+                factor_dict[f'CNTD{w}'] = self.ops.mean(up, w) - self.ops.mean(down, w)
 
         # SUMP - 上涨幅度占比 (类似RSI)
         if use('SUMP'):
@@ -556,7 +560,7 @@ class Alpha158Calculator:
             gain = self.ops.greater(change, pd.Series(0, index=c.index))
             abs_change = np.abs(change)
             for w in windows:
-                factors[f'SUMP{w}'] = self.ops.sum(gain, w) / (self.ops.sum(abs_change, w) + self.EPS)
+                factor_dict[f'SUMP{w}'] = self.ops.sum(gain, w) / (self.ops.sum(abs_change, w) + self.EPS)
 
         # SUMN - 下跌幅度占比
         if use('SUMN'):
@@ -564,7 +568,7 @@ class Alpha158Calculator:
             loss = self.ops.greater(-change, pd.Series(0, index=c.index))
             abs_change = np.abs(change)
             for w in windows:
-                factors[f'SUMN{w}'] = self.ops.sum(loss, w) / (self.ops.sum(abs_change, w) + self.EPS)
+                factor_dict[f'SUMN{w}'] = self.ops.sum(loss, w) / (self.ops.sum(abs_change, w) + self.EPS)
 
         # SUMD - 涨跌幅度差
         if use('SUMD'):
@@ -573,24 +577,24 @@ class Alpha158Calculator:
             loss = self.ops.greater(-change, pd.Series(0, index=c.index))
             abs_change = np.abs(change)
             for w in windows:
-                factors[f'SUMD{w}'] = (self.ops.sum(gain, w) - self.ops.sum(loss, w)) / (self.ops.sum(abs_change, w) + self.EPS)
+                factor_dict[f'SUMD{w}'] = (self.ops.sum(gain, w) - self.ops.sum(loss, w)) / (self.ops.sum(abs_change, w) + self.EPS)
 
         # VMA - 成交量移动平均
         if use('VMA'):
             for w in windows:
-                factors[f'VMA{w}'] = self.ops.mean(v, w) / (v + self.EPS)
+                factor_dict[f'VMA{w}'] = self.ops.mean(v, w) / (v + self.EPS)
 
         # VSTD - 成交量标准差
         if use('VSTD'):
             for w in windows:
-                factors[f'VSTD{w}'] = self.ops.std(v, w) / (v + self.EPS)
+                factor_dict[f'VSTD{w}'] = self.ops.std(v, w) / (v + self.EPS)
 
         # WVMA - 加权成交量波动
         if use('WVMA'):
             c_ret = np.abs(c / self.ops.ref(c, 1) - 1)
             weighted = c_ret * v
             for w in windows:
-                factors[f'WVMA{w}'] = self.ops.std(weighted, w) / (self.ops.mean(weighted, w) + self.EPS)
+                factor_dict[f'WVMA{w}'] = self.ops.std(weighted, w) / (self.ops.mean(weighted, w) + self.EPS)
 
         # VSUMP - 成交量上涨占比
         if use('VSUMP'):
@@ -598,7 +602,7 @@ class Alpha158Calculator:
             v_gain = self.ops.greater(v_change, pd.Series(0, index=v.index))
             v_abs = np.abs(v_change)
             for w in windows:
-                factors[f'VSUMP{w}'] = self.ops.sum(v_gain, w) / (self.ops.sum(v_abs, w) + self.EPS)
+                factor_dict[f'VSUMP{w}'] = self.ops.sum(v_gain, w) / (self.ops.sum(v_abs, w) + self.EPS)
 
         # VSUMN - 成交量下跌占比
         if use('VSUMN'):
@@ -606,7 +610,7 @@ class Alpha158Calculator:
             v_loss = self.ops.greater(-v_change, pd.Series(0, index=v.index))
             v_abs = np.abs(v_change)
             for w in windows:
-                factors[f'VSUMN{w}'] = self.ops.sum(v_loss, w) / (self.ops.sum(v_abs, w) + self.EPS)
+                factor_dict[f'VSUMN{w}'] = self.ops.sum(v_loss, w) / (self.ops.sum(v_abs, w) + self.EPS)
 
         # VSUMD - 成交量涨跌差
         if use('VSUMD'):
@@ -615,9 +619,13 @@ class Alpha158Calculator:
             v_loss = self.ops.greater(-v_change, pd.Series(0, index=v.index))
             v_abs = np.abs(v_change)
             for w in windows:
-                factors[f'VSUMD{w}'] = (self.ops.sum(v_gain, w) - self.ops.sum(v_loss, w)) / (self.ops.sum(v_abs, w) + self.EPS)
+                factor_dict[f'VSUMD{w}'] = (self.ops.sum(v_gain, w) - self.ops.sum(v_loss, w)) / (self.ops.sum(v_abs, w) + self.EPS)
 
-        return factors
+        # 一次性创建 DataFrame，避免碎片化
+        if factor_dict:
+            return pd.concat(factor_dict, axis=1)
+        else:
+            return pd.DataFrame(index=df.index)
 
     def _compute_crypto(
         self,
