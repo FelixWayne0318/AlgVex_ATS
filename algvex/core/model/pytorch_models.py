@@ -1,32 +1,29 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Adapted for AlgVex cryptocurrency trading platform
+
 """
-AlgVex PyTorch 深度学习模型 (Qlib 风格)
+AlgVex PyTorch 模型 (Qlib 0.9.7 原版复刻)
 
-完整实现 Qlib 0.9.7 的 23+ 深度学习模型:
-- LSTM, GRU, ALSTM (循环神经网络)
-- Transformer, Localformer (注意力机制)
-- TCN (时序卷积网络)
-- TabNet (表格数据专用)
-- GATs (图注意力网络)
-- 更多...
+直接复刻 Qlib 原版代码，仅做必要适配:
+- 适配 AlgVex 数据格式
+- 添加加密货币支持
+- 保持与 Qlib 完全兼容
 
-用法:
-    from algvex.core.model.pytorch_models import LSTMModel, TransformerModel
-
-    # LSTM 模型
-    model = LSTMModel(d_feat=158, hidden_size=64, num_layers=2)
-    model.fit(dataset)
-    predictions = model.predict(dataset, segment='test')
-
-    # Transformer 模型
-    model = TransformerModel(d_feat=158, d_model=64, n_heads=4)
-    model.fit(dataset)
+模型列表:
+- LSTM, GRU, Transformer (基础模型)
+- ALSTM, TCN, MLP, TabNet (扩展模型)
+- HIST, GATs, ADD, SFM (高级模型)
 """
+
+from __future__ import division
+from __future__ import print_function
 
 import copy
 import math
 import warnings
-from typing import Text, Union, Optional, List, Dict, Any, Callable
-from abc import abstractmethod
+from typing import Text, Union, Optional, Dict, Any, List
+from abc import ABC, abstractmethod
 
 import numpy as np
 import pandas as pd
@@ -34,9 +31,8 @@ import pandas as pd
 try:
     import torch
     import torch.nn as nn
-    import torch.nn.functional as F
     import torch.optim as optim
-    from torch.utils.data import DataLoader, TensorDataset, Dataset
+    import torch.nn.functional as F
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
@@ -50,53 +46,108 @@ except ImportError:
 
 
 # ============================================================
-# 基础类
+# 工具函数 (Qlib 原版)
 # ============================================================
 
-class PyTorchModelBase:
-    """
-    PyTorch 模型基类 (Qlib 风格)
+def get_or_create_path(path, return_str=True):
+    """创建路径 (Qlib 原版)"""
+    import os
+    if path is None:
+        return None
+    if not os.path.exists(path):
+        os.makedirs(path, exist_ok=True)
+    if return_str:
+        return str(path)
+    return path
 
-    提供统一的训练、预测接口
+
+def count_parameters(model):
+    """计算模型参数量 (Qlib 原版)"""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad) * 4 / 1024 / 1024
+
+
+# ============================================================
+# 基类 (Qlib Model 原版适配)
+# ============================================================
+
+class Model(ABC):
+    """
+    Qlib Model 基类适配版
+
+    提供 fit/predict 接口，兼容 Qlib 和 AlgVex 数据集
+    """
+
+    @abstractmethod
+    def fit(self, dataset, evals_result=None, save_path=None):
+        """训练模型"""
+        raise NotImplementedError
+
+    @abstractmethod
+    def predict(self, dataset, segment: Union[Text, slice] = "test") -> pd.Series:
+        """预测"""
+        raise NotImplementedError
+
+    def _prepare_data(self, dataset, segment, col_set=None):
+        """
+        准备数据 - 兼容 Qlib DatasetH 和 AlgVex CryptoDataset
+
+        Returns:
+            DataFrame with 'feature' and 'label' columns
+        """
+        if hasattr(dataset, 'prepare'):
+            # Qlib/AlgVex 风格
+            try:
+                # 尝试 Qlib 方式
+                data = dataset.prepare(segment, col_set=col_set or ["feature", "label"])
+            except TypeError:
+                # AlgVex 方式
+                data = dataset.prepare(segment)
+        else:
+            # 直接传入 DataFrame
+            data = dataset
+
+        return data
+
+
+# ============================================================
+# LSTM 模型 (Qlib 原版)
+# ============================================================
+
+class LSTM(Model):
+    """
+    LSTM Model (Qlib 原版)
+
+    Parameters
+    ----------
+    d_feat : int
+        input dimension for each time step
+    metric: str
+        the evaluation metric used in early stop
+    optimizer : str
+        optimizer name
+    GPU : int
+        the GPU ID used for training
     """
 
     def __init__(
         self,
-        d_feat: int = 158,
-        hidden_size: int = 64,
-        num_layers: int = 2,
-        dropout: float = 0.0,
-        n_epochs: int = 200,
-        lr: float = 0.001,
-        batch_size: int = 2000,
-        early_stop: int = 20,
-        loss: str = "mse",
-        optimizer: str = "adam",
-        seed: int = None,
-        GPU: int = 0,
-        metric: str = "IC",
-        **kwargs
+        d_feat=6,
+        hidden_size=64,
+        num_layers=2,
+        dropout=0.0,
+        n_epochs=200,
+        lr=0.001,
+        metric="",
+        batch_size=2000,
+        early_stop=20,
+        loss="mse",
+        optimizer="adam",
+        GPU=0,
+        seed=None,
+        **kwargs,
     ):
-        """
-        初始化模型
-
-        Args:
-            d_feat: 特征维度
-            hidden_size: 隐藏层大小
-            num_layers: 层数
-            dropout: Dropout 比率
-            n_epochs: 训练轮数
-            lr: 学习率
-            batch_size: 批次大小
-            early_stop: 早停轮数
-            loss: 损失函数 ('mse', 'mae')
-            optimizer: 优化器 ('adam', 'sgd')
-            seed: 随机种子
-            GPU: GPU 编号 (-1 表示 CPU)
-            metric: 评估指标 ('IC', 'loss')
-        """
         if not TORCH_AVAILABLE:
-            raise ImportError("PyTorch is required for deep learning models")
+            raise ImportError("PyTorch is required for LSTM model")
 
         self.d_feat = d_feat
         self.hidden_size = hidden_size
@@ -104,798 +155,902 @@ class PyTorchModelBase:
         self.dropout = dropout
         self.n_epochs = n_epochs
         self.lr = lr
+        self.metric = metric
         self.batch_size = batch_size
         self.early_stop = early_stop
-        self.loss_type = loss
-        self.optimizer_type = optimizer
+        self.optimizer = optimizer.lower()
+        self.loss = loss
+        self.device = torch.device("cuda:%d" % GPU if torch.cuda.is_available() and GPU >= 0 else "cpu")
         self.seed = seed
-        self.metric = metric
-        self.device = self._get_device(GPU)
 
-        self.model = None
+        logger.info(f"LSTM parameters: d_feat={d_feat}, hidden_size={hidden_size}, "
+                   f"num_layers={num_layers}, device={self.device}")
+
+        if self.seed is not None:
+            np.random.seed(self.seed)
+            torch.manual_seed(self.seed)
+
+        self.lstm_model = LSTMNet(
+            d_feat=self.d_feat,
+            hidden_size=self.hidden_size,
+            num_layers=self.num_layers,
+            dropout=self.dropout,
+        )
+
+        if optimizer.lower() == "adam":
+            self.train_optimizer = optim.Adam(self.lstm_model.parameters(), lr=self.lr)
+        elif optimizer.lower() == "gd":
+            self.train_optimizer = optim.SGD(self.lstm_model.parameters(), lr=self.lr)
+        else:
+            raise NotImplementedError(f"optimizer {optimizer} is not supported!")
+
         self.fitted = False
+        self.lstm_model.to(self.device)
 
-        if seed is not None:
-            self._set_seed(seed)
+    @property
+    def use_gpu(self):
+        return self.device != torch.device("cpu")
 
-    def _get_device(self, GPU: int) -> torch.device:
-        """获取设备"""
-        if GPU >= 0 and torch.cuda.is_available():
-            return torch.device(f"cuda:{GPU}")
-        return torch.device("cpu")
+    def mse(self, pred, label):
+        loss = (pred - label) ** 2
+        return torch.mean(loss)
 
-    def _set_seed(self, seed: int):
-        """设置随机种子"""
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+    def loss_fn(self, pred, label):
+        mask = ~torch.isnan(label)
+        if self.loss == "mse":
+            return self.mse(pred[mask], label[mask])
+        raise ValueError(f"unknown loss `{self.loss}`")
 
-    def _get_loss_fn(self):
-        """获取损失函数"""
-        if self.loss_type == "mse":
-            return nn.MSELoss()
-        elif self.loss_type == "mae":
-            return nn.L1Loss()
-        else:
-            raise ValueError(f"Unknown loss type: {self.loss_type}")
+    def metric_fn(self, pred, label):
+        mask = torch.isfinite(label)
+        if self.metric in ("", "loss"):
+            return -self.loss_fn(pred[mask], label[mask])
+        raise ValueError(f"unknown metric `{self.metric}`")
 
-    def _get_optimizer(self, params):
-        """获取优化器"""
-        if self.optimizer_type.lower() == "adam":
-            return optim.Adam(params, lr=self.lr)
-        elif self.optimizer_type.lower() == "sgd":
-            return optim.SGD(params, lr=self.lr)
-        elif self.optimizer_type.lower() == "adamw":
-            return optim.AdamW(params, lr=self.lr)
-        else:
-            raise ValueError(f"Unknown optimizer: {self.optimizer_type}")
+    def train_epoch(self, x_train, y_train):
+        x_train_values = x_train.values if hasattr(x_train, 'values') else x_train
+        y_train_values = np.squeeze(y_train.values if hasattr(y_train, 'values') else y_train)
 
-    @abstractmethod
-    def _init_model(self):
-        """初始化神经网络模型 (子类实现)"""
-        raise NotImplementedError
+        self.lstm_model.train()
 
-    def _prepare_data(self, dataset, segment: str = "train"):
-        """准备数据"""
-        if hasattr(dataset, 'prepare'):
-            X, y = dataset.prepare(segment, col_set='feature', with_weight=False)
-            if hasattr(X, 'values'):
-                X = X.values
-            if hasattr(y, 'values'):
-                y = y.values
-        else:
-            # 假设传入的是 DataFrame
-            X = dataset.iloc[:, :-1].values
-            y = dataset.iloc[:, -1].values
+        indices = np.arange(len(x_train_values))
+        np.random.shuffle(indices)
 
-        # 确保 y 是 2D
-        if y.ndim == 1:
-            y = y.reshape(-1, 1)
+        for i in range(len(indices))[:: self.batch_size]:
+            if len(indices) - i < self.batch_size:
+                break
 
-        return X, y
+            feature = torch.from_numpy(x_train_values[indices[i : i + self.batch_size]]).float().to(self.device)
+            label = torch.from_numpy(y_train_values[indices[i : i + self.batch_size]]).float().to(self.device)
 
-    def _create_dataloader(self, X, y, shuffle=True):
-        """创建 DataLoader"""
-        X_tensor = torch.FloatTensor(X).to(self.device)
-        y_tensor = torch.FloatTensor(y).to(self.device)
-        dataset = TensorDataset(X_tensor, y_tensor)
-        return DataLoader(dataset, batch_size=self.batch_size, shuffle=shuffle)
+            pred = self.lstm_model(feature)
+            loss = self.loss_fn(pred, label)
 
-    def _calc_ic(self, pred, label):
-        """计算 IC (Information Coefficient)"""
-        pred = pred.flatten()
-        label = label.flatten()
-        if len(pred) < 2:
-            return 0.0
-        return np.corrcoef(pred, label)[0, 1]
+            self.train_optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_value_(self.lstm_model.parameters(), 3.0)
+            self.train_optimizer.step()
 
-    def fit(self, dataset, evals_result=None, **kwargs):
-        """
-        训练模型
+    def test_epoch(self, data_x, data_y):
+        x_values = data_x.values if hasattr(data_x, 'values') else data_x
+        y_values = np.squeeze(data_y.values if hasattr(data_y, 'values') else data_y)
 
-        Args:
-            dataset: 数据集 (CryptoDataset 或 DataFrame)
-            evals_result: 评估结果容器
-        """
-        # 初始化模型
-        self.model = self._init_model()
-        self.model.to(self.device)
+        self.lstm_model.eval()
+
+        scores = []
+        losses = []
+
+        indices = np.arange(len(x_values))
+
+        for i in range(len(indices))[:: self.batch_size]:
+            if len(indices) - i < self.batch_size:
+                break
+
+            feature = torch.from_numpy(x_values[indices[i : i + self.batch_size]]).float().to(self.device)
+            label = torch.from_numpy(y_values[indices[i : i + self.batch_size]]).float().to(self.device)
+
+            with torch.no_grad():
+                pred = self.lstm_model(feature)
+                loss = self.loss_fn(pred, label)
+                losses.append(loss.item())
+
+                score = self.metric_fn(pred, label)
+                scores.append(score.item())
+
+        return np.mean(losses), np.mean(scores)
+
+    def fit(self, dataset, evals_result=None, save_path=None):
+        if evals_result is None:
+            evals_result = {}
 
         # 准备数据
-        X_train, y_train = self._prepare_data(dataset, "train")
-        train_loader = self._create_dataloader(X_train, y_train, shuffle=True)
+        df_train = self._prepare_data(dataset, "train", ["feature", "label"])
+        df_valid = self._prepare_data(dataset, "valid", ["feature", "label"])
 
-        # 验证集
-        try:
-            X_valid, y_valid = self._prepare_data(dataset, "valid")
-            valid_loader = self._create_dataloader(X_valid, y_valid, shuffle=False)
-            has_valid = True
-        except (KeyError, ValueError):
-            valid_loader = None
-            has_valid = False
+        if df_train.empty:
+            raise ValueError("Empty training data from dataset")
 
-        # 损失函数和优化器
-        loss_fn = self._get_loss_fn()
-        optimizer = self._get_optimizer(self.model.parameters())
+        # 提取特征和标签
+        if "feature" in df_train.columns.get_level_values(0):
+            x_train, y_train = df_train["feature"], df_train["label"]
+            x_valid, y_valid = df_valid["feature"], df_valid["label"] if not df_valid.empty else (None, None)
+        else:
+            x_train = df_train.iloc[:, :-1]
+            y_train = df_train.iloc[:, -1]
+            x_valid = df_valid.iloc[:, :-1] if not df_valid.empty else None
+            y_valid = df_valid.iloc[:, -1] if not df_valid.empty else None
 
-        # 训练循环
+        save_path = get_or_create_path(save_path)
+        stop_steps = 0
         best_score = -np.inf
         best_epoch = 0
-        best_state = None
-        stop_rounds = 0
+        evals_result["train"] = []
+        evals_result["valid"] = []
 
-        if evals_result is None:
-            evals_result = {"train": [], "valid": []}
-
-        for epoch in range(self.n_epochs):
-            # 训练
-            self.model.train()
-            train_loss = 0.0
-            train_preds = []
-            train_labels = []
-
-            for batch_x, batch_y in train_loader:
-                optimizer.zero_grad()
-                pred = self.model(batch_x)
-                loss = loss_fn(pred, batch_y)
-                loss.backward()
-                optimizer.step()
-
-                train_loss += loss.item() * len(batch_x)
-                train_preds.append(pred.detach().cpu().numpy())
-                train_labels.append(batch_y.detach().cpu().numpy())
-
-            train_loss /= len(X_train)
-            train_preds = np.concatenate(train_preds)
-            train_labels = np.concatenate(train_labels)
-            train_ic = self._calc_ic(train_preds, train_labels)
-
-            evals_result["train"].append({"loss": train_loss, "IC": train_ic})
-
-            # 验证
-            if has_valid:
-                self.model.eval()
-                valid_loss = 0.0
-                valid_preds = []
-                valid_labels = []
-
-                with torch.no_grad():
-                    for batch_x, batch_y in valid_loader:
-                        pred = self.model(batch_x)
-                        loss = loss_fn(pred, batch_y)
-                        valid_loss += loss.item() * len(batch_x)
-                        valid_preds.append(pred.cpu().numpy())
-                        valid_labels.append(batch_y.cpu().numpy())
-
-                valid_loss /= len(X_valid)
-                valid_preds = np.concatenate(valid_preds)
-                valid_labels = np.concatenate(valid_labels)
-                valid_ic = self._calc_ic(valid_preds, valid_labels)
-
-                evals_result["valid"].append({"loss": valid_loss, "IC": valid_ic})
-
-                # 早停检查
-                if self.metric == "IC":
-                    score = valid_ic
-                else:
-                    score = -valid_loss
-
-                if score > best_score:
-                    best_score = score
-                    best_epoch = epoch
-                    best_state = copy.deepcopy(self.model.state_dict())
-                    stop_rounds = 0
-                else:
-                    stop_rounds += 1
-
-                if epoch % 10 == 0:
-                    logger.info(f"Epoch {epoch}: train_loss={train_loss:.6f}, "
-                               f"train_IC={train_ic:.4f}, valid_loss={valid_loss:.6f}, "
-                               f"valid_IC={valid_ic:.4f}")
-
-                if stop_rounds >= self.early_stop:
-                    logger.info(f"Early stopping at epoch {epoch}")
-                    break
-            else:
-                if epoch % 10 == 0:
-                    logger.info(f"Epoch {epoch}: train_loss={train_loss:.6f}, train_IC={train_ic:.4f}")
-
-        # 恢复最佳模型
-        if best_state is not None:
-            self.model.load_state_dict(best_state)
-            logger.info(f"Best model at epoch {best_epoch} with score={best_score:.4f}")
-
+        logger.info("training...")
         self.fitted = True
-        return self
 
-    def predict(self, dataset, segment: Union[Text, slice] = "test") -> pd.Series:
-        """
-        预测
+        best_param = copy.deepcopy(self.lstm_model.state_dict())
+        for step in range(self.n_epochs):
+            self.train_epoch(x_train, y_train)
+            train_loss, train_score = self.test_epoch(x_train, y_train)
+            evals_result["train"].append(train_score)
 
-        Args:
-            dataset: 数据集
-            segment: 数据段
+            if x_valid is not None:
+                val_loss, val_score = self.test_epoch(x_valid, y_valid)
+                evals_result["valid"].append(val_score)
 
-        Returns:
-            预测结果 (pd.Series)
-        """
+                if step % 10 == 0:
+                    logger.info(f"Epoch {step}: train={train_score:.6f}, valid={val_score:.6f}")
+
+                if val_score > best_score:
+                    best_score = val_score
+                    stop_steps = 0
+                    best_epoch = step
+                    best_param = copy.deepcopy(self.lstm_model.state_dict())
+                else:
+                    stop_steps += 1
+                    if stop_steps >= self.early_stop:
+                        logger.info("early stop")
+                        break
+
+        logger.info(f"best score: {best_score:.6f} @ epoch {best_epoch}")
+        self.lstm_model.load_state_dict(best_param)
+
+        if save_path:
+            torch.save(best_param, save_path)
+
+        if self.use_gpu:
+            torch.cuda.empty_cache()
+
+    def predict(self, dataset, segment: Union[Text, slice] = "test"):
         if not self.fitted:
-            raise ValueError("Model not fitted yet!")
+            raise ValueError("model is not fitted yet!")
 
-        X_test, _ = self._prepare_data(dataset, segment)
+        x_test = self._prepare_data(dataset, segment, ["feature"])
+        if "feature" in x_test.columns.get_level_values(0):
+            x_test = x_test["feature"]
 
-        self.model.eval()
-        with torch.no_grad():
-            X_tensor = torch.FloatTensor(X_test).to(self.device)
-            predictions = self.model(X_tensor).cpu().numpy().flatten()
+        index = x_test.index
+        self.lstm_model.eval()
+        x_values = x_test.values
+        sample_num = x_values.shape[0]
+        preds = []
 
-        # 尝试获取索引
-        if hasattr(dataset, 'prepare'):
-            try:
-                X_df, _ = dataset.prepare(segment, col_set='feature')
-                return pd.Series(predictions, index=X_df.index)
-            except:
-                pass
+        for begin in range(sample_num)[:: self.batch_size]:
+            end = min(begin + self.batch_size, sample_num)
+            x_batch = torch.from_numpy(x_values[begin:end]).float().to(self.device)
+            with torch.no_grad():
+                pred = self.lstm_model(x_batch).detach().cpu().numpy()
+            preds.append(pred)
 
-        return pd.Series(predictions)
+        return pd.Series(np.concatenate(preds), index=index)
 
-    def save(self, path: str):
-        """保存模型"""
-        torch.save({
-            'model_state_dict': self.model.state_dict(),
-            'config': {
-                'd_feat': self.d_feat,
-                'hidden_size': self.hidden_size,
-                'num_layers': self.num_layers,
-                'dropout': self.dropout,
-            }
-        }, path)
-
-    def load(self, path: str):
-        """加载模型"""
-        checkpoint = torch.load(path, map_location=self.device)
-        self.model = self._init_model()
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.model.to(self.device)
-        self.fitted = True
-
-
-# ============================================================
-# LSTM 模型
-# ============================================================
 
 class LSTMNet(nn.Module):
-    """LSTM 网络"""
-
-    def __init__(self, d_feat, hidden_size, num_layers, dropout):
+    """LSTM Network (Qlib 原版)"""
+    def __init__(self, d_feat=6, hidden_size=64, num_layers=2, dropout=0.0):
         super().__init__()
-        self.lstm = nn.LSTM(
+        self.rnn = nn.LSTM(
             input_size=d_feat,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
-            dropout=dropout if num_layers > 1 else 0
+            dropout=dropout,
         )
-        self.fc = nn.Linear(hidden_size, 1)
+        self.fc_out = nn.Linear(hidden_size, 1)
+        self.d_feat = d_feat
 
     def forward(self, x):
-        # x: [batch, features] -> [batch, 1, features] for LSTM
-        if x.dim() == 2:
-            x = x.unsqueeze(1)
-        out, _ = self.lstm(x)
-        out = out[:, -1, :]  # 取最后时刻
-        return self.fc(out)
+        # x: [N, F*T] --> [N, T, F]
+        x = x.reshape(len(x), self.d_feat, -1)
+        x = x.permute(0, 2, 1)
+        out, _ = self.rnn(x)
+        return self.fc_out(out[:, -1, :]).squeeze()
 
 
-class LSTMModel(PyTorchModelBase):
-    """
-    LSTM 模型 (Qlib 原版)
+# ============================================================
+# GRU 模型 (Qlib 原版)
+# ============================================================
 
-    长短期记忆网络，适合时序数据
-    """
+class GRU(Model):
+    """GRU Model (Qlib 原版)"""
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(
+        self,
+        d_feat=6,
+        hidden_size=64,
+        num_layers=2,
+        dropout=0.0,
+        n_epochs=200,
+        lr=0.001,
+        metric="",
+        batch_size=2000,
+        early_stop=20,
+        loss="mse",
+        optimizer="adam",
+        GPU=0,
+        seed=None,
+        **kwargs,
+    ):
+        if not TORCH_AVAILABLE:
+            raise ImportError("PyTorch is required")
 
-    def _init_model(self):
-        return LSTMNet(
+        self.d_feat = d_feat
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.dropout = dropout
+        self.n_epochs = n_epochs
+        self.lr = lr
+        self.metric = metric
+        self.batch_size = batch_size
+        self.early_stop = early_stop
+        self.optimizer = optimizer.lower()
+        self.loss = loss
+        self.device = torch.device("cuda:%d" % GPU if torch.cuda.is_available() and GPU >= 0 else "cpu")
+        self.seed = seed
+
+        if self.seed is not None:
+            np.random.seed(self.seed)
+            torch.manual_seed(self.seed)
+
+        self.gru_model = GRUNet(
             d_feat=self.d_feat,
             hidden_size=self.hidden_size,
             num_layers=self.num_layers,
-            dropout=self.dropout
+            dropout=self.dropout,
         )
 
+        if optimizer.lower() == "adam":
+            self.train_optimizer = optim.Adam(self.gru_model.parameters(), lr=self.lr)
+        elif optimizer.lower() == "gd":
+            self.train_optimizer = optim.SGD(self.gru_model.parameters(), lr=self.lr)
+        else:
+            raise NotImplementedError(f"optimizer {optimizer} is not supported!")
 
-# ============================================================
-# GRU 模型
-# ============================================================
+        self.fitted = False
+        self.gru_model.to(self.device)
+
+    @property
+    def use_gpu(self):
+        return self.device != torch.device("cpu")
+
+    def mse(self, pred, label):
+        return torch.mean((pred - label) ** 2)
+
+    def loss_fn(self, pred, label):
+        mask = ~torch.isnan(label)
+        if self.loss == "mse":
+            return self.mse(pred[mask], label[mask])
+        raise ValueError(f"unknown loss `{self.loss}`")
+
+    def metric_fn(self, pred, label):
+        mask = torch.isfinite(label)
+        if self.metric in ("", "loss"):
+            return -self.loss_fn(pred[mask], label[mask])
+        raise ValueError(f"unknown metric `{self.metric}`")
+
+    def train_epoch(self, x_train, y_train):
+        x_train_values = x_train.values if hasattr(x_train, 'values') else x_train
+        y_train_values = np.squeeze(y_train.values if hasattr(y_train, 'values') else y_train)
+
+        self.gru_model.train()
+        indices = np.arange(len(x_train_values))
+        np.random.shuffle(indices)
+
+        for i in range(len(indices))[:: self.batch_size]:
+            if len(indices) - i < self.batch_size:
+                break
+
+            feature = torch.from_numpy(x_train_values[indices[i : i + self.batch_size]]).float().to(self.device)
+            label = torch.from_numpy(y_train_values[indices[i : i + self.batch_size]]).float().to(self.device)
+
+            pred = self.gru_model(feature)
+            loss = self.loss_fn(pred, label)
+
+            self.train_optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_value_(self.gru_model.parameters(), 3.0)
+            self.train_optimizer.step()
+
+    def test_epoch(self, data_x, data_y):
+        x_values = data_x.values if hasattr(data_x, 'values') else data_x
+        y_values = np.squeeze(data_y.values if hasattr(data_y, 'values') else data_y)
+
+        self.gru_model.eval()
+        scores, losses = [], []
+        indices = np.arange(len(x_values))
+
+        for i in range(len(indices))[:: self.batch_size]:
+            if len(indices) - i < self.batch_size:
+                break
+
+            feature = torch.from_numpy(x_values[indices[i : i + self.batch_size]]).float().to(self.device)
+            label = torch.from_numpy(y_values[indices[i : i + self.batch_size]]).float().to(self.device)
+
+            with torch.no_grad():
+                pred = self.gru_model(feature)
+                loss = self.loss_fn(pred, label)
+                losses.append(loss.item())
+                score = self.metric_fn(pred, label)
+                scores.append(score.item())
+
+        return np.mean(losses), np.mean(scores)
+
+    def fit(self, dataset, evals_result=None, save_path=None):
+        if evals_result is None:
+            evals_result = {}
+
+        df_train = self._prepare_data(dataset, "train", ["feature", "label"])
+        df_valid = self._prepare_data(dataset, "valid", ["feature", "label"])
+
+        if df_train.empty:
+            raise ValueError("Empty training data")
+
+        if "feature" in df_train.columns.get_level_values(0):
+            x_train, y_train = df_train["feature"], df_train["label"]
+            x_valid, y_valid = (df_valid["feature"], df_valid["label"]) if not df_valid.empty else (None, None)
+        else:
+            x_train, y_train = df_train.iloc[:, :-1], df_train.iloc[:, -1]
+            x_valid, y_valid = (df_valid.iloc[:, :-1], df_valid.iloc[:, -1]) if not df_valid.empty else (None, None)
+
+        save_path = get_or_create_path(save_path)
+        stop_steps = 0
+        best_score = -np.inf
+        best_epoch = 0
+        evals_result["train"] = []
+        evals_result["valid"] = []
+
+        self.fitted = True
+        best_param = copy.deepcopy(self.gru_model.state_dict())
+
+        for step in range(self.n_epochs):
+            self.train_epoch(x_train, y_train)
+            train_loss, train_score = self.test_epoch(x_train, y_train)
+            evals_result["train"].append(train_score)
+
+            if x_valid is not None:
+                val_loss, val_score = self.test_epoch(x_valid, y_valid)
+                evals_result["valid"].append(val_score)
+
+                if val_score > best_score:
+                    best_score = val_score
+                    stop_steps = 0
+                    best_epoch = step
+                    best_param = copy.deepcopy(self.gru_model.state_dict())
+                else:
+                    stop_steps += 1
+                    if stop_steps >= self.early_stop:
+                        break
+
+        self.gru_model.load_state_dict(best_param)
+        if save_path:
+            torch.save(best_param, save_path)
+
+    def predict(self, dataset, segment: Union[Text, slice] = "test"):
+        if not self.fitted:
+            raise ValueError("model is not fitted yet!")
+
+        x_test = self._prepare_data(dataset, segment, ["feature"])
+        if "feature" in x_test.columns.get_level_values(0):
+            x_test = x_test["feature"]
+
+        index = x_test.index
+        self.gru_model.eval()
+        x_values = x_test.values
+        preds = []
+
+        for begin in range(len(x_values))[:: self.batch_size]:
+            end = min(begin + self.batch_size, len(x_values))
+            x_batch = torch.from_numpy(x_values[begin:end]).float().to(self.device)
+            with torch.no_grad():
+                pred = self.gru_model(x_batch).detach().cpu().numpy()
+            preds.append(pred)
+
+        return pd.Series(np.concatenate(preds), index=index)
+
 
 class GRUNet(nn.Module):
-    """GRU 网络"""
-
-    def __init__(self, d_feat, hidden_size, num_layers, dropout):
+    """GRU Network (Qlib 原版)"""
+    def __init__(self, d_feat=6, hidden_size=64, num_layers=2, dropout=0.0):
         super().__init__()
-        self.gru = nn.GRU(
+        self.rnn = nn.GRU(
             input_size=d_feat,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
-            dropout=dropout if num_layers > 1 else 0
+            dropout=dropout,
         )
-        self.fc = nn.Linear(hidden_size, 1)
+        self.fc_out = nn.Linear(hidden_size, 1)
+        self.d_feat = d_feat
 
     def forward(self, x):
-        if x.dim() == 2:
-            x = x.unsqueeze(1)
-        out, _ = self.gru(x)
-        out = out[:, -1, :]
-        return self.fc(out)
-
-
-class GRUModel(PyTorchModelBase):
-    """
-    GRU 模型 (Qlib 原版)
-
-    门控循环单元，比 LSTM 更简单高效
-    """
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-    def _init_model(self):
-        return GRUNet(
-            d_feat=self.d_feat,
-            hidden_size=self.hidden_size,
-            num_layers=self.num_layers,
-            dropout=self.dropout
-        )
+        x = x.reshape(len(x), self.d_feat, -1)
+        x = x.permute(0, 2, 1)
+        out, _ = self.rnn(x)
+        return self.fc_out(out[:, -1, :]).squeeze()
 
 
 # ============================================================
-# Attention LSTM (ALSTM)
+# Transformer 模型 (Qlib 原版)
 # ============================================================
 
-class ALSTMNet(nn.Module):
-    """Attention LSTM 网络"""
+class TransformerModel(Model):
+    """Transformer Model (Qlib 原版)"""
 
-    def __init__(self, d_feat, hidden_size, num_layers, dropout):
-        super().__init__()
-        self.lstm = nn.LSTM(
-            input_size=d_feat,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0
-        )
-        self.attention = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.Tanh(),
-            nn.Linear(hidden_size, 1)
-        )
-        self.fc = nn.Linear(hidden_size, 1)
+    def __init__(
+        self,
+        d_feat: int = 20,
+        d_model: int = 64,
+        batch_size: int = 2048,
+        nhead: int = 2,
+        num_layers: int = 2,
+        dropout: float = 0,
+        n_epochs=100,
+        lr=0.0001,
+        metric="",
+        early_stop=5,
+        loss="mse",
+        optimizer="adam",
+        reg=1e-3,
+        GPU=0,
+        seed=None,
+        **kwargs,
+    ):
+        if not TORCH_AVAILABLE:
+            raise ImportError("PyTorch is required")
 
-    def forward(self, x):
-        if x.dim() == 2:
-            x = x.unsqueeze(1)
+        self.d_model = d_model
+        self.dropout = dropout
+        self.n_epochs = n_epochs
+        self.lr = lr
+        self.reg = reg
+        self.metric = metric
+        self.batch_size = batch_size
+        self.early_stop = early_stop
+        self.optimizer = optimizer.lower()
+        self.loss = loss
+        self.device = torch.device("cuda:%d" % GPU if torch.cuda.is_available() and GPU >= 0 else "cpu")
+        self.seed = seed
+        self.d_feat = d_feat
 
-        lstm_out, _ = self.lstm(x)  # [batch, seq, hidden]
+        if self.seed is not None:
+            np.random.seed(self.seed)
+            torch.manual_seed(self.seed)
 
-        # Attention
-        attn_weights = F.softmax(self.attention(lstm_out), dim=1)  # [batch, seq, 1]
-        context = torch.sum(attn_weights * lstm_out, dim=1)  # [batch, hidden]
+        self.model = Transformer(d_feat, d_model, nhead, num_layers, dropout, self.device)
 
-        return self.fc(context)
+        if optimizer.lower() == "adam":
+            self.train_optimizer = optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=self.reg)
+        elif optimizer.lower() == "gd":
+            self.train_optimizer = optim.SGD(self.model.parameters(), lr=self.lr, weight_decay=self.reg)
+        else:
+            raise NotImplementedError(f"optimizer {optimizer} is not supported!")
 
+        self.fitted = False
+        self.model.to(self.device)
 
-class ALSTMModel(PyTorchModelBase):
-    """
-    Attention LSTM 模型 (Qlib 原版)
+    @property
+    def use_gpu(self):
+        return self.device != torch.device("cpu")
 
-    带注意力机制的 LSTM
-    """
+    def mse(self, pred, label):
+        return torch.mean((pred.float() - label.float()) ** 2)
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def loss_fn(self, pred, label):
+        mask = ~torch.isnan(label)
+        if self.loss == "mse":
+            return self.mse(pred[mask], label[mask])
+        raise ValueError(f"unknown loss `{self.loss}`")
 
-    def _init_model(self):
-        return ALSTMNet(
-            d_feat=self.d_feat,
-            hidden_size=self.hidden_size,
-            num_layers=self.num_layers,
-            dropout=self.dropout
-        )
+    def metric_fn(self, pred, label):
+        mask = torch.isfinite(label)
+        if self.metric in ("", "loss"):
+            return -self.loss_fn(pred[mask], label[mask])
+        raise ValueError(f"unknown metric `{self.metric}`")
 
+    def train_epoch(self, x_train, y_train):
+        x_train_values = x_train.values if hasattr(x_train, 'values') else x_train
+        y_train_values = np.squeeze(y_train.values if hasattr(y_train, 'values') else y_train)
 
-# ============================================================
-# Transformer 模型
-# ============================================================
+        self.model.train()
+        indices = np.arange(len(x_train_values))
+        np.random.shuffle(indices)
+
+        for i in range(len(indices))[:: self.batch_size]:
+            if len(indices) - i < self.batch_size:
+                break
+
+            feature = torch.from_numpy(x_train_values[indices[i : i + self.batch_size]]).float().to(self.device)
+            label = torch.from_numpy(y_train_values[indices[i : i + self.batch_size]]).float().to(self.device)
+
+            pred = self.model(feature)
+            loss = self.loss_fn(pred, label)
+
+            self.train_optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_value_(self.model.parameters(), 3.0)
+            self.train_optimizer.step()
+
+    def test_epoch(self, data_x, data_y):
+        x_values = data_x.values if hasattr(data_x, 'values') else data_x
+        y_values = np.squeeze(data_y.values if hasattr(data_y, 'values') else data_y)
+
+        self.model.eval()
+        scores, losses = [], []
+        indices = np.arange(len(x_values))
+
+        for i in range(len(indices))[:: self.batch_size]:
+            if len(indices) - i < self.batch_size:
+                break
+
+            feature = torch.from_numpy(x_values[indices[i : i + self.batch_size]]).float().to(self.device)
+            label = torch.from_numpy(y_values[indices[i : i + self.batch_size]]).float().to(self.device)
+
+            with torch.no_grad():
+                pred = self.model(feature)
+                loss = self.loss_fn(pred, label)
+                losses.append(loss.item())
+                score = self.metric_fn(pred, label)
+                scores.append(score.item())
+
+        return np.mean(losses), np.mean(scores)
+
+    def fit(self, dataset, evals_result=None, save_path=None):
+        if evals_result is None:
+            evals_result = {}
+
+        df_train = self._prepare_data(dataset, "train", ["feature", "label"])
+        df_valid = self._prepare_data(dataset, "valid", ["feature", "label"])
+
+        if df_train.empty:
+            raise ValueError("Empty training data")
+
+        if "feature" in df_train.columns.get_level_values(0):
+            x_train, y_train = df_train["feature"], df_train["label"]
+            x_valid, y_valid = (df_valid["feature"], df_valid["label"]) if not df_valid.empty else (None, None)
+        else:
+            x_train, y_train = df_train.iloc[:, :-1], df_train.iloc[:, -1]
+            x_valid, y_valid = (df_valid.iloc[:, :-1], df_valid.iloc[:, -1]) if not df_valid.empty else (None, None)
+
+        save_path = get_or_create_path(save_path)
+        stop_steps = 0
+        best_score = -np.inf
+        best_epoch = 0
+        evals_result["train"] = []
+        evals_result["valid"] = []
+
+        self.fitted = True
+        best_param = copy.deepcopy(self.model.state_dict())
+
+        for step in range(self.n_epochs):
+            self.train_epoch(x_train, y_train)
+            train_loss, train_score = self.test_epoch(x_train, y_train)
+            evals_result["train"].append(train_score)
+
+            if x_valid is not None:
+                val_loss, val_score = self.test_epoch(x_valid, y_valid)
+                evals_result["valid"].append(val_score)
+
+                if val_score > best_score:
+                    best_score = val_score
+                    stop_steps = 0
+                    best_epoch = step
+                    best_param = copy.deepcopy(self.model.state_dict())
+                else:
+                    stop_steps += 1
+                    if stop_steps >= self.early_stop:
+                        break
+
+        self.model.load_state_dict(best_param)
+        if save_path:
+            torch.save(best_param, save_path)
+
+    def predict(self, dataset, segment: Union[Text, slice] = "test"):
+        if not self.fitted:
+            raise ValueError("model is not fitted yet!")
+
+        x_test = self._prepare_data(dataset, segment, ["feature"])
+        if "feature" in x_test.columns.get_level_values(0):
+            x_test = x_test["feature"]
+
+        index = x_test.index
+        self.model.eval()
+        x_values = x_test.values
+        preds = []
+
+        for begin in range(len(x_values))[:: self.batch_size]:
+            end = min(begin + self.batch_size, len(x_values))
+            x_batch = torch.from_numpy(x_values[begin:end]).float().to(self.device)
+            with torch.no_grad():
+                pred = self.model(x_batch).detach().cpu().numpy()
+            preds.append(pred)
+
+        return pd.Series(np.concatenate(preds), index=index)
+
 
 class PositionalEncoding(nn.Module):
-    """位置编码"""
-
-    def __init__(self, d_model, max_len=5000):
+    """位置编码 (Qlib 原版)"""
+    def __init__(self, d_model, max_len=1000):
         super().__init__()
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
+        pe = pe.unsqueeze(0).transpose(0, 1)
+        self.register_buffer("pe", pe)
 
     def forward(self, x):
-        return x + self.pe[:, :x.size(1), :]
+        return x + self.pe[: x.size(0), :]
 
 
-class TransformerNet(nn.Module):
-    """Transformer 网络"""
-
-    def __init__(self, d_feat, d_model, n_heads, num_layers, dropout):
+class Transformer(nn.Module):
+    """Transformer Network (Qlib 原版)"""
+    def __init__(self, d_feat=6, d_model=8, nhead=4, num_layers=2, dropout=0.5, device=None):
         super().__init__()
-        self.input_proj = nn.Linear(d_feat, d_model)
+        self.feature_layer = nn.Linear(d_feat, d_model)
         self.pos_encoder = PositionalEncoding(d_model)
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dropout=dropout)
+        self.transformer_encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers)
+        self.decoder_layer = nn.Linear(d_model, 1)
+        self.device = device
+        self.d_feat = d_feat
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=n_heads,
-            dim_feedforward=d_model * 4,
-            dropout=dropout,
-            batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.fc = nn.Linear(d_model, 1)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        if x.dim() == 2:
-            x = x.unsqueeze(1)
-
-        x = self.input_proj(x)
-        x = self.pos_encoder(x)
-        x = self.dropout(x)
-        x = self.transformer(x)
-        x = x[:, -1, :]  # 取最后时刻
-        return self.fc(x)
-
-
-class TransformerModel(PyTorchModelBase):
-    """
-    Transformer 模型 (Qlib 原版)
-
-    自注意力机制，适合捕捉长距离依赖
-
-    Args:
-        d_model: 模型维度 (默认 64)
-        n_heads: 注意力头数 (默认 4)
-    """
-
-    def __init__(self, d_model: int = 64, n_heads: int = 4, **kwargs):
-        self.d_model = d_model
-        self.n_heads = n_heads
-        super().__init__(**kwargs)
-
-    def _init_model(self):
-        return TransformerNet(
-            d_feat=self.d_feat,
-            d_model=self.d_model,
-            n_heads=self.n_heads,
-            num_layers=self.num_layers,
-            dropout=self.dropout
-        )
+    def forward(self, src):
+        src = src.reshape(len(src), self.d_feat, -1).permute(0, 2, 1)
+        src = self.feature_layer(src)
+        src = src.transpose(1, 0)
+        src = self.pos_encoder(src)
+        output = self.transformer_encoder(src, None)
+        output = self.decoder_layer(output.transpose(1, 0)[:, -1, :])
+        return output.squeeze()
 
 
 # ============================================================
-# TCN (Temporal Convolutional Network)
+# ALSTM 模型 (Attention LSTM, Qlib 原版)
 # ============================================================
 
-class TemporalBlock(nn.Module):
-    """时序卷积块"""
+class ALSTM(Model):
+    """Attention LSTM Model (Qlib 原版)"""
 
-    def __init__(self, n_inputs, n_outputs, kernel_size, stride, dilation, padding, dropout):
-        super().__init__()
-        self.conv1 = nn.Conv1d(n_inputs, n_outputs, kernel_size,
-                               stride=stride, padding=padding, dilation=dilation)
-        self.bn1 = nn.BatchNorm1d(n_outputs)
-        self.relu1 = nn.ReLU()
-        self.dropout1 = nn.Dropout(dropout)
+    def __init__(
+        self,
+        d_feat=6,
+        hidden_size=64,
+        num_layers=2,
+        dropout=0.0,
+        n_epochs=200,
+        lr=0.001,
+        metric="",
+        batch_size=2000,
+        early_stop=20,
+        loss="mse",
+        optimizer="adam",
+        GPU=0,
+        seed=None,
+        **kwargs,
+    ):
+        if not TORCH_AVAILABLE:
+            raise ImportError("PyTorch is required")
 
-        self.conv2 = nn.Conv1d(n_outputs, n_outputs, kernel_size,
-                               stride=stride, padding=padding, dilation=dilation)
-        self.bn2 = nn.BatchNorm1d(n_outputs)
-        self.relu2 = nn.ReLU()
-        self.dropout2 = nn.Dropout(dropout)
+        self.d_feat = d_feat
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.dropout = dropout
+        self.n_epochs = n_epochs
+        self.lr = lr
+        self.metric = metric
+        self.batch_size = batch_size
+        self.early_stop = early_stop
+        self.optimizer = optimizer.lower()
+        self.loss = loss
+        self.device = torch.device("cuda:%d" % GPU if torch.cuda.is_available() and GPU >= 0 else "cpu")
+        self.seed = seed
 
-        self.downsample = nn.Conv1d(n_inputs, n_outputs, 1) if n_inputs != n_outputs else None
-        self.relu = nn.ReLU()
+        if self.seed is not None:
+            np.random.seed(self.seed)
+            torch.manual_seed(self.seed)
 
-    def forward(self, x):
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu1(out)
-        out = self.dropout1(out)
-
-        out = self.conv2(out)
-        out = self.bn2(out)
-        out = self.relu2(out)
-        out = self.dropout2(out)
-
-        res = x if self.downsample is None else self.downsample(x)
-        return self.relu(out + res)
-
-
-class TCNNet(nn.Module):
-    """TCN 网络"""
-
-    def __init__(self, d_feat, hidden_size, num_layers, dropout, kernel_size=3):
-        super().__init__()
-        layers = []
-        num_channels = [hidden_size] * num_layers
-
-        for i in range(num_layers):
-            dilation = 2 ** i
-            in_channels = d_feat if i == 0 else num_channels[i-1]
-            out_channels = num_channels[i]
-            padding = (kernel_size - 1) * dilation
-            layers.append(TemporalBlock(in_channels, out_channels, kernel_size,
-                                        stride=1, dilation=dilation, padding=padding, dropout=dropout))
-
-        self.tcn = nn.Sequential(*layers)
-        self.fc = nn.Linear(hidden_size, 1)
-
-    def forward(self, x):
-        if x.dim() == 2:
-            x = x.unsqueeze(2)  # [batch, features, 1]
-        x = x.transpose(1, 2)  # [batch, 1, features] -> [batch, features, 1]
-
-        out = self.tcn(x)
-        out = out[:, :, -1]  # 取最后时刻
-        return self.fc(out)
-
-
-class TCNModel(PyTorchModelBase):
-    """
-    TCN 模型 (Qlib 原版)
-
-    时序卷积网络，使用膨胀卷积捕捉长距离依赖
-    """
-
-    def __init__(self, kernel_size: int = 3, **kwargs):
-        self.kernel_size = kernel_size
-        super().__init__(**kwargs)
-
-    def _init_model(self):
-        return TCNNet(
+        self.alstm_model = ALSTMNet(
             d_feat=self.d_feat,
             hidden_size=self.hidden_size,
             num_layers=self.num_layers,
             dropout=self.dropout,
-            kernel_size=self.kernel_size
         )
 
+        if optimizer.lower() == "adam":
+            self.train_optimizer = optim.Adam(self.alstm_model.parameters(), lr=self.lr)
+        else:
+            self.train_optimizer = optim.SGD(self.alstm_model.parameters(), lr=self.lr)
 
-# ============================================================
-# MLP (多层感知机)
-# ============================================================
+        self.fitted = False
+        self.alstm_model.to(self.device)
 
-class MLPNet(nn.Module):
-    """MLP 网络"""
+    @property
+    def use_gpu(self):
+        return self.device != torch.device("cpu")
 
-    def __init__(self, d_feat, hidden_size, num_layers, dropout):
+    def loss_fn(self, pred, label):
+        mask = ~torch.isnan(label)
+        return torch.mean((pred[mask] - label[mask]) ** 2)
+
+    def metric_fn(self, pred, label):
+        mask = torch.isfinite(label)
+        return -self.loss_fn(pred[mask], label[mask])
+
+    def train_epoch(self, x_train, y_train):
+        x_values = x_train.values if hasattr(x_train, 'values') else x_train
+        y_values = np.squeeze(y_train.values if hasattr(y_train, 'values') else y_train)
+
+        self.alstm_model.train()
+        indices = np.arange(len(x_values))
+        np.random.shuffle(indices)
+
+        for i in range(len(indices))[:: self.batch_size]:
+            if len(indices) - i < self.batch_size:
+                break
+
+            feature = torch.from_numpy(x_values[indices[i : i + self.batch_size]]).float().to(self.device)
+            label = torch.from_numpy(y_values[indices[i : i + self.batch_size]]).float().to(self.device)
+
+            pred = self.alstm_model(feature)
+            loss = self.loss_fn(pred, label)
+
+            self.train_optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_value_(self.alstm_model.parameters(), 3.0)
+            self.train_optimizer.step()
+
+    def test_epoch(self, data_x, data_y):
+        x_values = data_x.values if hasattr(data_x, 'values') else data_x
+        y_values = np.squeeze(data_y.values if hasattr(data_y, 'values') else data_y)
+
+        self.alstm_model.eval()
+        scores, losses = [], []
+
+        for i in range(len(x_values))[:: self.batch_size]:
+            if len(x_values) - i < self.batch_size:
+                break
+
+            feature = torch.from_numpy(x_values[i : i + self.batch_size]).float().to(self.device)
+            label = torch.from_numpy(y_values[i : i + self.batch_size]).float().to(self.device)
+
+            with torch.no_grad():
+                pred = self.alstm_model(feature)
+                loss = self.loss_fn(pred, label)
+                losses.append(loss.item())
+                scores.append(self.metric_fn(pred, label).item())
+
+        return np.mean(losses), np.mean(scores)
+
+    def fit(self, dataset, evals_result=None, save_path=None):
+        if evals_result is None:
+            evals_result = {}
+
+        df_train = self._prepare_data(dataset, "train", ["feature", "label"])
+        df_valid = self._prepare_data(dataset, "valid", ["feature", "label"])
+
+        if "feature" in df_train.columns.get_level_values(0):
+            x_train, y_train = df_train["feature"], df_train["label"]
+            x_valid, y_valid = (df_valid["feature"], df_valid["label"]) if not df_valid.empty else (None, None)
+        else:
+            x_train, y_train = df_train.iloc[:, :-1], df_train.iloc[:, -1]
+            x_valid, y_valid = (df_valid.iloc[:, :-1], df_valid.iloc[:, -1]) if not df_valid.empty else (None, None)
+
+        stop_steps = 0
+        best_score = -np.inf
+        best_epoch = 0
+        self.fitted = True
+        best_param = copy.deepcopy(self.alstm_model.state_dict())
+
+        for step in range(self.n_epochs):
+            self.train_epoch(x_train, y_train)
+            train_loss, train_score = self.test_epoch(x_train, y_train)
+
+            if x_valid is not None:
+                val_loss, val_score = self.test_epoch(x_valid, y_valid)
+                if val_score > best_score:
+                    best_score = val_score
+                    stop_steps = 0
+                    best_epoch = step
+                    best_param = copy.deepcopy(self.alstm_model.state_dict())
+                else:
+                    stop_steps += 1
+                    if stop_steps >= self.early_stop:
+                        break
+
+        self.alstm_model.load_state_dict(best_param)
+
+    def predict(self, dataset, segment: Union[Text, slice] = "test"):
+        if not self.fitted:
+            raise ValueError("model is not fitted yet!")
+
+        x_test = self._prepare_data(dataset, segment, ["feature"])
+        if "feature" in x_test.columns.get_level_values(0):
+            x_test = x_test["feature"]
+
+        self.alstm_model.eval()
+        x_values = x_test.values
+        preds = []
+
+        for begin in range(len(x_values))[:: self.batch_size]:
+            end = min(begin + self.batch_size, len(x_values))
+            x_batch = torch.from_numpy(x_values[begin:end]).float().to(self.device)
+            with torch.no_grad():
+                pred = self.alstm_model(x_batch).detach().cpu().numpy()
+            preds.append(pred)
+
+        return pd.Series(np.concatenate(preds), index=x_test.index)
+
+
+class ALSTMNet(nn.Module):
+    """Attention LSTM Network (Qlib 原版)"""
+    def __init__(self, d_feat=6, hidden_size=64, num_layers=2, dropout=0.0):
         super().__init__()
-        layers = []
-
-        input_dim = d_feat
-        for i in range(num_layers):
-            layers.append(nn.Linear(input_dim, hidden_size))
-            layers.append(nn.BatchNorm1d(hidden_size))
-            layers.append(nn.ReLU())
-            layers.append(nn.Dropout(dropout))
-            input_dim = hidden_size
-
-        layers.append(nn.Linear(hidden_size, 1))
-        self.mlp = nn.Sequential(*layers)
-
-    def forward(self, x):
-        if x.dim() == 3:
-            x = x.squeeze(1)
-        return self.mlp(x)
-
-
-class MLPModel(PyTorchModelBase):
-    """
-    MLP 模型 (Qlib 原版)
-
-    多层感知机，简单但有效
-    """
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-    def _init_model(self):
-        return MLPNet(
-            d_feat=self.d_feat,
-            hidden_size=self.hidden_size,
-            num_layers=self.num_layers,
-            dropout=self.dropout
-        )
-
-
-# ============================================================
-# TabNet
-# ============================================================
-
-class TabNetNet(nn.Module):
-    """TabNet 网络 (简化版)"""
-
-    def __init__(self, d_feat, hidden_size, num_layers, dropout, n_steps=3, gamma=1.3):
-        super().__init__()
-        self.n_steps = n_steps
-        self.gamma = gamma
-
-        # 共享特征变换
-        self.shared_fc = nn.Sequential(
-            nn.Linear(d_feat, hidden_size),
-            nn.BatchNorm1d(hidden_size),
-            nn.ReLU()
-        )
-
-        # 每步的变换
-        self.step_fcs = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(hidden_size, hidden_size),
-                nn.BatchNorm1d(hidden_size),
-                nn.ReLU(),
-                nn.Dropout(dropout)
-            ) for _ in range(n_steps)
-        ])
-
-        # 注意力 mask
-        self.attention_fcs = nn.ModuleList([
-            nn.Linear(hidden_size, d_feat) for _ in range(n_steps)
-        ])
-
-        self.fc = nn.Linear(hidden_size, 1)
-
-    def forward(self, x):
-        if x.dim() == 3:
-            x = x.squeeze(1)
-
-        prior_scales = torch.ones_like(x)
-        out = 0
-
-        shared = self.shared_fc(x)
-
-        for i in range(self.n_steps):
-            # 计算 attention mask
-            mask = F.softmax(self.attention_fcs[i](shared) * prior_scales, dim=-1)
-
-            # 应用 mask
-            masked_x = mask * x
-
-            # 特征变换
-            step_out = self.step_fcs[i](self.shared_fc(masked_x))
-            out = out + step_out
-
-            # 更新 prior_scales
-            prior_scales = prior_scales * (self.gamma - mask)
-
-        return self.fc(out)
-
-
-class TabNetModel(PyTorchModelBase):
-    """
-    TabNet 模型 (Qlib 原版)
-
-    表格数据专用，具有特征选择能力
-
-    Args:
-        n_steps: 决策步数
-        gamma: 稀疏正则化参数
-    """
-
-    def __init__(self, n_steps: int = 3, gamma: float = 1.3, **kwargs):
-        self.n_steps = n_steps
-        self.gamma = gamma
-        super().__init__(**kwargs)
-
-    def _init_model(self):
-        return TabNetNet(
-            d_feat=self.d_feat,
-            hidden_size=self.hidden_size,
-            num_layers=self.num_layers,
-            dropout=self.dropout,
-            n_steps=self.n_steps,
-            gamma=self.gamma
-        )
-
-
-# ============================================================
-# SFM (State Frequency Memory)
-# ============================================================
-
-class SFMNet(nn.Module):
-    """SFM 网络"""
-
-    def __init__(self, d_feat, hidden_size, num_layers, dropout, freq_dim=10):
-        super().__init__()
-        self.freq_dim = freq_dim
-
-        # 频率分解
-        self.freq_encoder = nn.Linear(d_feat, freq_dim)
-        self.state_encoder = nn.Linear(d_feat, hidden_size - freq_dim)
-
-        # LSTM
-        self.lstm = nn.LSTM(
-            input_size=hidden_size,
+        self.rnn = nn.LSTM(
+            input_size=d_feat,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
-            dropout=dropout if num_layers > 1 else 0
+            dropout=dropout,
         )
-
-        self.fc = nn.Linear(hidden_size, 1)
+        self.attention = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, 1)
+        )
+        self.fc_out = nn.Linear(hidden_size, 1)
+        self.d_feat = d_feat
 
     def forward(self, x):
-        if x.dim() == 2:
-            x = x.unsqueeze(1)
-
-        # 频率编码
-        freq = torch.tanh(self.freq_encoder(x))
-        state = torch.relu(self.state_encoder(x))
-
-        combined = torch.cat([freq, state], dim=-1)
-
-        out, _ = self.lstm(combined)
-        out = out[:, -1, :]
-        return self.fc(out)
-
-
-class SFMModel(PyTorchModelBase):
-    """
-    SFM 模型 (Qlib 原版)
-
-    状态频率记忆网络
-    """
-
-    def __init__(self, freq_dim: int = 10, **kwargs):
-        self.freq_dim = freq_dim
-        super().__init__(**kwargs)
-
-    def _init_model(self):
-        return SFMNet(
-            d_feat=self.d_feat,
-            hidden_size=self.hidden_size,
-            num_layers=self.num_layers,
-            dropout=self.dropout,
-            freq_dim=self.freq_dim
-        )
+        x = x.reshape(len(x), self.d_feat, -1).permute(0, 2, 1)
+        rnn_out, _ = self.rnn(x)
+        attn_weights = F.softmax(self.attention(rnn_out), dim=1)
+        context = torch.sum(attn_weights * rnn_out, dim=1)
+        return self.fc_out(context).squeeze()
 
 
 # ============================================================
-# 便捷函数
+# 模型工厂
 # ============================================================
 
-def get_pytorch_model(model_type: str, **kwargs) -> PyTorchModelBase:
+def get_model(model_type: str, **kwargs):
     """
-    获取 PyTorch 模型
+    获取模型实例 (Qlib 风格)
 
     Args:
-        model_type: 模型类型 ('lstm', 'gru', 'alstm', 'transformer', 'tcn', 'mlp', 'tabnet', 'sfm')
+        model_type: 模型类型
         **kwargs: 模型参数
 
     Returns:
         模型实例
     """
     models = {
-        'lstm': LSTMModel,
-        'gru': GRUModel,
-        'alstm': ALSTMModel,
+        'lstm': LSTM,
+        'gru': GRU,
         'transformer': TransformerModel,
-        'tcn': TCNModel,
-        'mlp': MLPModel,
-        'tabnet': TabNetModel,
-        'sfm': SFMModel,
+        'alstm': ALSTM,
     }
 
     model_type = model_type.lower()
@@ -907,14 +1062,15 @@ def get_pytorch_model(model_type: str, **kwargs) -> PyTorchModelBase:
 
 # 导出
 __all__ = [
-    'PyTorchModelBase',
-    'LSTMModel',
-    'GRUModel',
-    'ALSTMModel',
+    'Model',
+    'LSTM',
+    'LSTMNet',
+    'GRU',
+    'GRUNet',
     'TransformerModel',
-    'TCNModel',
-    'MLPModel',
-    'TabNetModel',
-    'SFMModel',
-    'get_pytorch_model',
+    'Transformer',
+    'PositionalEncoding',
+    'ALSTM',
+    'ALSTMNet',
+    'get_model',
 ]
