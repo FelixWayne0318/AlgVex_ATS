@@ -15,6 +15,12 @@
 - 并行采集支持 (joblib)
 - 数据完整性验证 (check_data_length)
 - 详细进度追踪
+- 本地缓存机制 (类似 Qlib 的 provider_uri 和 DiskDatasetCache)
+
+缓存机制说明:
+    类似 Qlib 的 provider_uri，数据存储在 data_dir 目录下
+    使用 use_cache=True 时，优先从本地加载，只下载缺失/过期的数据
+    缓存有效期由 cache_valid_days 控制
 """
 
 import time
@@ -86,18 +92,23 @@ class BinanceDataCollector:
         retry_delay: float = 2.0,           # 重试间隔
         max_workers: int = 4,               # 并行工作数
         check_data_length: int = 0,         # 最小数据条数验证 (0=不验证)
+        # 缓存参数 (类似 Qlib 的 provider_uri 机制)
+        use_cache: bool = True,             # 是否使用本地缓存
+        cache_valid_days: int = 7,          # 缓存有效期(天)
     ):
         """
         初始化采集器
 
         Args:
             symbols: 交易对列表, 如 ['BTCUSDT', 'ETHUSDT']
-            data_dir: 数据存储目录
+            data_dir: 数据存储目录 (类似 Qlib 的 provider_uri)
             rate_limit_delay: API调用间隔(秒)
             max_collector_count: 最大重试次数 (Qlib 风格)
             retry_delay: 重试间隔(秒)
             max_workers: 并行采集的工作线程数
             check_data_length: 最小数据条数，低于此值视为采集失败
+            use_cache: 是否使用本地缓存 (类似 Qlib 的 DiskDatasetCache)
+            cache_valid_days: 缓存有效期(天)，超过此时间需重新下载
         """
         self.symbols = symbols or ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"]
         self.data_dir = Path(data_dir).expanduser()
@@ -109,11 +120,17 @@ class BinanceDataCollector:
         self.max_workers = max_workers
         self.check_data_length = check_data_length
 
+        # 缓存参数
+        self.use_cache = use_cache
+        self.cache_valid_days = cache_valid_days
+
         # 统计信息
         self._stats = {
             "success": 0,
             "failed": 0,
             "retried": 0,
+            "cache_hit": 0,
+            "cache_miss": 0,
         }
 
         # 创建数据目录
@@ -123,6 +140,7 @@ class BinanceDataCollector:
 
         logger.info(f"BinanceDataCollector initialized with {len(self.symbols)} symbols")
         logger.info(f"  max_retries={max_collector_count}, workers={max_workers}, min_length={check_data_length}")
+        logger.info(f"  cache={'enabled' if use_cache else 'disabled'}, valid_days={cache_valid_days}")
 
     def _request(self, url: str, params: dict = None) -> Optional[dict]:
         """
@@ -188,7 +206,132 @@ class BinanceDataCollector:
 
     def reset_stats(self):
         """重置统计信息"""
-        self._stats = {"success": 0, "failed": 0, "retried": 0}
+        self._stats = {"success": 0, "failed": 0, "retried": 0, "cache_hit": 0, "cache_miss": 0}
+
+    # ==================== 缓存管理 (Qlib 风格) ====================
+
+    def check_cache_valid(self, data_type: str, symbol: str) -> tuple:
+        """
+        检查缓存是否有效 (类似 Qlib 的 DiskDatasetCache 检查)
+
+        Args:
+            data_type: 数据类型 ('klines', 'funding', 'oi', 等)
+            symbol: 交易对
+
+        Returns:
+            tuple: (is_valid, file_path, cache_age_days)
+        """
+        cache_path = self.data_dir / data_type / f"{symbol}.parquet"
+
+        if not cache_path.exists():
+            return (False, cache_path, None)
+
+        # 检查缓存时间
+        mtime = datetime.fromtimestamp(cache_path.stat().st_mtime)
+        cache_age = (datetime.now() - mtime).days
+
+        is_valid = cache_age <= self.cache_valid_days
+        return (is_valid, cache_path, cache_age)
+
+    def load_symbol_cache(self, data_type: str, symbol: str) -> Optional[pd.DataFrame]:
+        """
+        加载单个交易对的缓存数据
+
+        Args:
+            data_type: 数据类型
+            symbol: 交易对
+
+        Returns:
+            DataFrame 或 None
+        """
+        is_valid, cache_path, cache_age = self.check_cache_valid(data_type, symbol)
+
+        if is_valid:
+            try:
+                df = pd.read_parquet(cache_path)
+                self._stats["cache_hit"] += 1
+                logger.debug(f"Cache hit: {symbol}/{data_type} ({cache_age} days old)")
+                return df
+            except Exception as e:
+                logger.warning(f"Cache read error for {symbol}/{data_type}: {e}")
+
+        self._stats["cache_miss"] += 1
+        return None
+
+    def save_symbol_cache(self, data_type: str, symbol: str, df: pd.DataFrame):
+        """
+        保存单个交易对的缓存数据
+
+        Args:
+            data_type: 数据类型
+            symbol: 交易对
+            df: 数据
+        """
+        if df is None or df.empty:
+            return
+
+        cache_path = self.data_dir / data_type / f"{symbol}.parquet"
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(cache_path, index=False)
+        logger.debug(f"Cache saved: {symbol}/{data_type} ({len(df)} rows)")
+
+    def get_cache_info(self) -> Dict[str, Dict]:
+        """
+        获取缓存状态信息
+
+        Returns:
+            dict: 各数据类型的缓存信息
+        """
+        info = {}
+        data_types = ["klines", "funding", "oi", "ls_ratio", "top_ls_ratio", "taker"]
+
+        for data_type in data_types:
+            type_dir = self.data_dir / data_type
+            if not type_dir.exists():
+                info[data_type] = {"files": 0, "symbols": []}
+                continue
+
+            files = list(type_dir.glob("*.parquet"))
+            symbols = [f.stem for f in files]
+
+            # 计算最新和最旧的缓存
+            if files:
+                mtimes = [datetime.fromtimestamp(f.stat().st_mtime) for f in files]
+                info[data_type] = {
+                    "files": len(files),
+                    "symbols": symbols,
+                    "oldest": min(mtimes),
+                    "newest": max(mtimes),
+                }
+            else:
+                info[data_type] = {"files": 0, "symbols": []}
+
+        return info
+
+    def clear_cache(self, data_type: str = None, symbol: str = None):
+        """
+        清除缓存
+
+        Args:
+            data_type: 数据类型 (None=所有类型)
+            symbol: 交易对 (None=所有交易对)
+        """
+        data_types = [data_type] if data_type else ["klines", "funding", "oi", "ls_ratio", "top_ls_ratio", "taker"]
+
+        for dt in data_types:
+            type_dir = self.data_dir / dt
+            if not type_dir.exists():
+                continue
+
+            if symbol:
+                cache_file = type_dir / f"{symbol}.parquet"
+                if cache_file.exists():
+                    cache_file.unlink()
+                    logger.info(f"Cache cleared: {symbol}/{dt}")
+            else:
+                for f in type_dir.glob("*.parquet"):
+                    f.unlink()
+                logger.info(f"Cache cleared: all/{dt}")
 
     # ==================== K线数据 ====================
     def fetch_klines(
@@ -604,23 +747,175 @@ class BinanceDataCollector:
 
         return pd.concat(dfs, ignore_index=True).drop_duplicates()
 
+    # ==================== 缓存优先采集 (Qlib 风格) ====================
+
+    def collect_with_cache(
+        self,
+        start_date: str,
+        end_date: str,
+        interval: str = "1h",
+        parallel: bool = True,
+        force_refresh: bool = False,
+    ) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """
+        缓存优先的数据采集 (类似 Qlib 的 provider_uri 机制)
+
+        工作流程:
+        1. 检查本地缓存是否存在且有效
+        2. 从缓存加载有效数据
+        3. 只下载缺失/过期的数据
+        4. 保存新下载的数据到缓存
+
+        Args:
+            start_date: 开始日期 'YYYY-MM-DD'
+            end_date: 结束日期 'YYYY-MM-DD'
+            interval: K线周期
+            parallel: 是否并行采集
+            force_refresh: 强制刷新 (忽略缓存)
+
+        Returns:
+            dict: {data_type: {symbol: DataFrame}}
+        """
+        self.reset_stats()
+        data_types = ["klines", "funding", "oi", "ls_ratio", "top_ls_ratio", "taker"]
+
+        # 结果存储
+        result = {dt: {} for dt in data_types}
+
+        # 需要下载的交易对
+        need_download = {dt: [] for dt in data_types}
+
+        logger.info(f"Collect with cache: {len(self.symbols)} symbols")
+        logger.info(f"  Period: {start_date} ~ {end_date}")
+        logger.info(f"  Cache: {'disabled (force_refresh)' if force_refresh else 'enabled'}")
+
+        # Step 1: 检查缓存
+        if self.use_cache and not force_refresh:
+            logger.info("Step 1: Checking cache...")
+            for dt in data_types:
+                for symbol in self.symbols:
+                    cached_data = self.load_symbol_cache(dt, symbol)
+                    if cached_data is not None:
+                        result[dt][symbol] = cached_data
+                    else:
+                        need_download[dt].append(symbol)
+
+            # 统计缓存命中
+            total_cached = sum(len(result[dt]) for dt in data_types)
+            total_need = sum(len(need_download[dt]) for dt in data_types)
+            logger.info(f"  Cache hit: {total_cached}, Cache miss: {total_need}")
+
+            if total_need == 0:
+                logger.info("All data loaded from cache!")
+                return result
+        else:
+            # 禁用缓存，全部需要下载
+            for dt in data_types:
+                need_download[dt] = self.symbols.copy()
+
+        # Step 2: 下载缺失的数据
+        logger.info("Step 2: Downloading missing data...")
+
+        start_ts = int(pd.Timestamp(start_date).timestamp() * 1000)
+        end_ts = int(pd.Timestamp(end_date).timestamp() * 1000)
+
+        # 找出需要下载任何数据的交易对
+        symbols_to_download = set()
+        for dt in data_types:
+            symbols_to_download.update(need_download[dt])
+
+        if not symbols_to_download:
+            logger.info("No data to download!")
+            return result
+
+        logger.info(f"  Symbols to download: {list(symbols_to_download)}")
+
+        # 采集数据
+        for symbol in symbols_to_download:
+            logger.info(f"  Collecting {symbol}...")
+
+            # 只采集需要的数据类型
+            if symbol in need_download["klines"]:
+                klines = self.fetch_klines(symbol, interval, start_ts, end_ts)
+                if self._validate_data(klines, "klines", symbol):
+                    result["klines"][symbol] = klines
+                    self.save_symbol_cache("klines", symbol, klines)
+
+            if symbol in need_download["funding"]:
+                funding = self.fetch_funding_rate(symbol, start_ts, end_ts)
+                if self._validate_data(funding, "funding", symbol):
+                    result["funding"][symbol] = funding
+                    self.save_symbol_cache("funding", symbol, funding)
+
+            if symbol in need_download["oi"]:
+                oi = self.fetch_open_interest_history(symbol, interval)
+                if self._validate_data(oi, "oi", symbol):
+                    result["oi"][symbol] = oi
+                    self.save_symbol_cache("oi", symbol, oi)
+
+            if symbol in need_download["ls_ratio"]:
+                ls = self.fetch_long_short_ratio(symbol, interval)
+                if self._validate_data(ls, "ls_ratio", symbol):
+                    result["ls_ratio"][symbol] = ls
+                    self.save_symbol_cache("ls_ratio", symbol, ls)
+
+            if symbol in need_download["top_ls_ratio"]:
+                top_ls = self.fetch_top_long_short_ratio(symbol, interval)
+                if self._validate_data(top_ls, "top_ls_ratio", symbol):
+                    result["top_ls_ratio"][symbol] = top_ls
+                    self.save_symbol_cache("top_ls_ratio", symbol, top_ls)
+
+            if symbol in need_download["taker"]:
+                taker = self.fetch_taker_long_short_ratio(symbol, interval)
+                if self._validate_data(taker, "taker", symbol):
+                    result["taker"][symbol] = taker
+                    self.save_symbol_cache("taker", symbol, taker)
+
+        # Step 3: 打印统计
+        stats = self.get_stats()
+        logger.info(f"Collection completed:")
+        logger.info(f"  API: success={stats['success']}, failed={stats['failed']}, retried={stats['retried']}")
+        logger.info(f"  Cache: hit={stats['cache_hit']}, miss={stats['cache_miss']}")
+
+        return result
+
 
 # ==================== 使用示例 ====================
 if __name__ == "__main__":
     # 配置日志
     logger.add("collector.log", rotation="10 MB")
 
-    # 初始化采集器
+    # 初始化采集器 (启用缓存)
     symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"]
-    collector = BinanceDataCollector(symbols)
+    collector = BinanceDataCollector(
+        symbols=symbols,
+        use_cache=True,          # 启用本地缓存 (类似 Qlib provider_uri)
+        cache_valid_days=7,      # 缓存7天有效
+    )
 
-    # 采集最近30天数据
+    # 采集最近30天数据 (缓存优先)
     end_date = datetime.now().strftime("%Y-%m-%d")
     start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
 
-    data = collector.collect_all(start_date, end_date, interval="1h")
-    collector.save_data(data)
+    # 方式1: 缓存优先采集 (推荐)
+    # 首次运行会下载，后续运行直接从缓存加载
+    data = collector.collect_with_cache(start_date, end_date, interval="1h")
 
     # 打印统计
-    for key, df in data.items():
-        print(f"{key}: {len(df)} rows")
+    print("\n=== 数据统计 ===")
+    for data_type, symbol_data in data.items():
+        total_rows = sum(len(df) for df in symbol_data.values())
+        print(f"{data_type}: {len(symbol_data)} symbols, {total_rows} rows")
+
+    # 查看缓存状态
+    print("\n=== 缓存状态 ===")
+    cache_info = collector.get_cache_info()
+    for dt, info in cache_info.items():
+        print(f"{dt}: {info['files']} files")
+
+    # 方式2: 强制刷新 (忽略缓存)
+    # data = collector.collect_with_cache(start_date, end_date, force_refresh=True)
+
+    # 方式3: 传统方式 (不使用缓存)
+    # data = collector.collect_all(start_date, end_date, interval="1h")
+    # collector.save_data(data)
