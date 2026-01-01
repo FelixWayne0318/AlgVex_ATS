@@ -59,6 +59,24 @@ from .qlib_models import (
     get_model,
 )
 
+# PyTorch 深度学习模型
+try:
+    from .pytorch_models import (
+        PyTorchModelBase,
+        LSTMModel,
+        GRUModel,
+        ALSTMModel,
+        TransformerModel,
+        TCNModel,
+        MLPModel,
+        TabNetModel,
+        SFMModel,
+        get_pytorch_model,
+    )
+    PYTORCH_MODELS_AVAILABLE = True
+except ImportError:
+    PYTORCH_MODELS_AVAILABLE = False
+
 __all__ = [
     # Trainer
     "ModelTrainer",
@@ -79,4 +97,16 @@ __all__ = [
     "XGBModel",
     "LinearModel",
     "get_model",
+    # PyTorch 深度学习模型
+    "PyTorchModelBase",
+    "LSTMModel",
+    "GRUModel",
+    "ALSTMModel",
+    "TransformerModel",
+    "TCNModel",
+    "MLPModel",
+    "TabNetModel",
+    "SFMModel",
+    "get_pytorch_model",
+    "PYTORCH_MODELS_AVAILABLE",
 ]
