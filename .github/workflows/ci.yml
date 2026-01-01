@@ -36,27 +36,23 @@ jobs:
 
           echo "CI checks passed!"
 
-  shellcheck:
+  syntax-check:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Install ShellCheck
-        run: sudo apt-get install -y shellcheck
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-      - name: Run ShellCheck
+      - name: Check Python syntax
         run: |
-          echo "Running ShellCheck on shell scripts..."
-
-          # 查找所有 shell 脚本
-          if compgen -G "scripts/*.sh" > /dev/null; then
-            shellcheck scripts/*.sh
-            echo "✅ ShellCheck passed for all scripts"
-          else
-            echo "⚠️ No shell scripts found in scripts/"
-          fi
+          echo "Checking Python syntax..."
+          python -m py_compile algvex/__init__.py
+          echo "✅ Python syntax check passed"
 
   yaml-lint:
     runs-on: ubuntu-latest

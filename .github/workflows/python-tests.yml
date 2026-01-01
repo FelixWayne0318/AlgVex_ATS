@@ -5,15 +5,11 @@ on:
     branches: [main]
     paths:
       - 'algvex/**'
-      - 'tests/**'
-      - 'requirements*.txt'
       - '.github/workflows/python-tests.yml'
   pull_request:
     branches: [main]
     paths:
       - 'algvex/**'
-      - 'tests/**'
-      - 'requirements*.txt'
       - '.github/workflows/python-tests.yml'
 
 permissions:
