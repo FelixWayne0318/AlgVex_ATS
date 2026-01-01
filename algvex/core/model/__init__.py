@@ -59,19 +59,30 @@ from .qlib_models import (
     get_model,
 )
 
-# PyTorch 深度学习模型
+# PyTorch 深度学习模型 (Qlib 原版复刻)
 try:
     from .pytorch_models import (
-        PyTorchModelBase,
-        LSTMModel,
-        GRUModel,
-        ALSTMModel,
-        TransformerModel,
-        TCNModel,
-        MLPModel,
-        TabNetModel,
-        SFMModel,
-        get_pytorch_model,
+        # 基类
+        Model as PyTorchModel,
+        # 基础模型
+        LSTM, LSTMNet,
+        GRU, GRUNet,
+        TransformerModel, Transformer, PositionalEncoding,
+        ALSTM, ALSTMNet,
+        # TCN 模型
+        TCN, TCNNet, TemporalConvNet, TemporalBlock, Chomp1d,
+        # SFM 模型
+        SFM, SFMNet,
+        # GATs 模型
+        GATs, GATNet,
+        # HIST 模型
+        HIST, HISTNet,
+        # IGMTF 模型
+        IGMTF, IGMTFNet,
+        # MLP 模型
+        MLP, MLPNet,
+        # 工厂函数
+        get_model as get_pytorch_model,
     )
     PYTORCH_MODELS_AVAILABLE = True
 except ImportError:
@@ -97,16 +108,18 @@ __all__ = [
     "XGBModel",
     "LinearModel",
     "get_model",
-    # PyTorch 深度学习模型
-    "PyTorchModelBase",
-    "LSTMModel",
-    "GRUModel",
-    "ALSTMModel",
-    "TransformerModel",
-    "TCNModel",
-    "MLPModel",
-    "TabNetModel",
-    "SFMModel",
+    # PyTorch 深度学习模型 (Qlib 原版)
+    "PyTorchModel",
+    "LSTM", "LSTMNet",
+    "GRU", "GRUNet",
+    "TransformerModel", "Transformer", "PositionalEncoding",
+    "ALSTM", "ALSTMNet",
+    "TCN", "TCNNet", "TemporalConvNet", "TemporalBlock", "Chomp1d",
+    "SFM", "SFMNet",
+    "GATs", "GATNet",
+    "HIST", "HISTNet",
+    "IGMTF", "IGMTFNet",
+    "MLP", "MLPNet",
     "get_pytorch_model",
     "PYTORCH_MODELS_AVAILABLE",
 ]
