@@ -1,6 +1,6 @@
 # AlgVex 核心方案 (P0 - MVP)
 
-> **版本**: v8.0.2 (2026-01-02)
+> **版本**: v8.1.0 (2026-01-02)
 > **状态**: 可直接运行的完整方案
 
 > **Qlib + Hummingbot 融合的加密货币现货量化交易平台**
@@ -16,10 +16,11 @@
 - [3. Qlib 修改](#3-qlib-修改)
 - [4. 数据准备](#4-数据准备)
 - [5. 模型训练](#5-模型训练)
-- [6. 策略脚本](#6-策略脚本)
-- [7. 配置文件](#7-配置文件)
-- [8. 启动与运行](#8-启动与运行)
-- [9. 验收标准](#9-验收标准)
+- [6. Qlib 回测](#6-qlib-回测)
+- [7. 策略脚本](#7-策略脚本)
+- [8. 配置文件](#8-配置文件)
+- [9. 启动与运行](#9-启动与运行)
+- [10. 验收标准](#10-验收标准)
 
 ---
 
@@ -95,7 +96,7 @@
 |------|----------|--------|------|
 | **Qlib** | 修改源码 | 2 | 添加 REG_CRYPTO 区域 |
 | **Hummingbot** | 零修改 | 0 | 使用 Strategy V2 框架 |
-| **新建脚本** | 新建 | 5 | 数据/训练/策略/控制器/配置 |
+| **新建脚本** | 新建 | 6 | 数据/训练/回测/策略/控制器/配置 |
 
 ---
 
@@ -114,9 +115,10 @@
 |------|----------|------|------|
 | 1 | `scripts/prepare_crypto_data.py` | 新建 | 数据准备脚本 |
 | 2 | `scripts/train_model.py` | 新建 | 模型训练脚本 |
-| 3 | `scripts/qlib_alpha_strategy.py` | 新建 | V2 策略主脚本 |
-| 4 | `controllers/qlib_alpha_controller.py` | 新建 | Qlib 信号控制器 |
-| 5 | `conf/controllers/qlib_alpha.yml` | 新建 | 策略配置 |
+| 3 | `scripts/backtest_model.py` | 新建 | Qlib 回测脚本 |
+| 4 | `scripts/qlib_alpha_strategy.py` | 新建 | V2 策略主脚本 |
+| 5 | `controllers/qlib_alpha_controller.py` | 新建 | Qlib 信号控制器 |
+| 6 | `conf/controllers/qlib_alpha.yml` | 新建 | 策略配置 |
 
 ### 2.3 Hummingbot
 
@@ -677,7 +679,399 @@ if __name__ == "__main__":
 
 ---
 
-## 6. 策略脚本 (Strategy V2)
+## 6. Qlib 回测
+
+> **重要**: 在实盘交易前，必须使用 Qlib 回测验证模型有效性。
+> Qlib 回测与 Hummingbot Paper Trading 互补，分别验证模型和执行逻辑。
+
+### 6.1 回测流程
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    完整验证流程                              │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Stage 1: Qlib 回测 (模型验证)                              │
+│  ───────────────────────────────                            │
+│  - 验证 Alpha158 因子有效性 (IC 值)                         │
+│  - 验证 LGBModel 预测能力                                   │
+│  - 计算策略收益率、夏普比率、最大回撤                        │
+│  - 快速迭代模型参数                                         │
+│  - 产出: 确认模型可用                                       │
+│                                                             │
+│  Stage 2: Hummingbot Paper Trading (执行验证)               │
+│  ───────────────────────────────                            │
+│  - 验证订单执行逻辑                                         │
+│  - 验证交易所连接                                           │
+│  - 验证风控 (止损/止盈)                                     │
+│  - 产出: 确认系统可上线                                     │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 6.2 回测脚本
+
+**文件路径**: `scripts/backtest_model.py`
+
+```python
+"""
+Qlib 回测脚本
+
+使用 Qlib 的 Backtest 模块验证模型有效性。
+
+用法:
+    python scripts/backtest_model.py --instruments btcusdt ethusdt
+
+输出指标:
+    - IC (Information Coefficient): 预测值与实际收益的相关性
+    - ICIR (IC Information Ratio): IC 的稳定性
+    - Rank IC: 排序相关性
+    - 年化收益率、夏普比率、最大回撤
+"""
+
+import pickle
+import argparse
+from pathlib import Path
+from typing import Optional
+
+import pandas as pd
+import numpy as np
+
+import qlib
+from qlib.constant import REG_CRYPTO
+from qlib.data.dataset import DatasetH
+from qlib.contrib.data.handler import Alpha158
+from qlib.contrib.evaluate import risk_analysis
+from qlib.contrib.strategy import TopkDropoutStrategy
+from qlib.contrib.report import analysis_model, analysis_position
+from qlib.backtest import backtest, executor
+
+
+def load_model(model_path: str):
+    """加载预训练模型"""
+    path = Path(model_path).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"Model not found: {path}")
+
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+
+def run_backtest(
+    qlib_data_path: str,
+    model_path: str,
+    instruments: list,
+    test_start: str,
+    test_end: str,
+    freq: str = "1h",
+    topk: int = 1,
+    n_drop: int = 0,
+    benchmark: str = "btcusdt",
+):
+    """
+    运行 Qlib 回测
+
+    Parameters
+    ----------
+    qlib_data_path : str
+        Qlib 数据路径
+    model_path : str
+        模型文件路径
+    instruments : list
+        交易对列表
+    test_start : str
+        测试开始日期
+    test_end : str
+        测试结束日期
+    freq : str
+        数据频率
+    topk : int
+        选择预测值最高的 K 个品种
+    n_drop : int
+        每次调仓时卖出的品种数
+    benchmark : str
+        基准品种
+    """
+    # 初始化 Qlib
+    print("Initializing Qlib with REG_CRYPTO...")
+    data_path = Path(qlib_data_path).expanduser().resolve()
+    qlib.init(provider_uri=str(data_path), region=REG_CRYPTO)
+
+    # 加载模型
+    print(f"Loading model from {model_path}...")
+    model = load_model(model_path)
+
+    # 创建测试数据集
+    print("Creating test dataset...")
+    handler = Alpha158(
+        instruments=instruments,
+        start_time=test_start,
+        end_time=test_end,
+        freq=freq,
+        infer_processors=[],
+        learn_processors=[
+            {"class": "DropnaLabel"},
+            {"class": "RobustZScoreNorm", "kwargs": {"fields_group": "label", "clip_outlier": True}},
+        ],
+    )
+
+    dataset = DatasetH(
+        handler=handler,
+        segments={
+            "test": (test_start, test_end),
+        },
+    )
+
+    # 生成预测
+    print("Generating predictions...")
+    predictions = model.predict(dataset, segment="test")
+    print(f"Predictions shape: {predictions.shape}")
+
+    # ========== 模型评估 ==========
+    print("\n" + "=" * 60)
+    print("模型评估 (Model Evaluation)")
+    print("=" * 60)
+
+    # 计算 IC 指标
+    ic_analysis = calculate_ic(predictions, dataset)
+    print(f"\nIC (Information Coefficient): {ic_analysis['IC']:.4f}")
+    print(f"ICIR (IC Information Ratio): {ic_analysis['ICIR']:.4f}")
+    print(f"Rank IC: {ic_analysis['Rank IC']:.4f}")
+    print(f"Rank ICIR: {ic_analysis['Rank ICIR']:.4f}")
+
+    # ========== 策略回测 ==========
+    print("\n" + "=" * 60)
+    print("策略回测 (Strategy Backtest)")
+    print("=" * 60)
+
+    # 创建策略
+    strategy = TopkDropoutStrategy(
+        signal=predictions,
+        topk=topk,
+        n_drop=n_drop,
+    )
+
+    # 回测执行器配置
+    executor_config = {
+        "time_per_step": "day" if freq == "1d" else freq,
+        "generate_portfolio_metrics": True,
+    }
+
+    # 运行回测
+    portfolio_metric_dict, indicator_dict = backtest(
+        executor=executor.SimulatorExecutor(**executor_config),
+        strategy=strategy,
+        start_time=test_start,
+        end_time=test_end,
+        benchmark=benchmark,
+    )
+
+    # 分析结果
+    analysis = analyze_results(portfolio_metric_dict, indicator_dict)
+
+    print(f"\n年化收益率 (Annual Return): {analysis['annual_return']:.2%}")
+    print(f"夏普比率 (Sharpe Ratio): {analysis['sharpe']:.2f}")
+    print(f"最大回撤 (Max Drawdown): {analysis['max_drawdown']:.2%}")
+    print(f"信息比率 (Information Ratio): {analysis['information_ratio']:.2f}")
+    print(f"胜率 (Win Rate): {analysis['win_rate']:.2%}")
+
+    # ========== 验收建议 ==========
+    print("\n" + "=" * 60)
+    print("验收建议 (Acceptance Criteria)")
+    print("=" * 60)
+
+    passed = True
+
+    if ic_analysis['IC'] < 0.02:
+        print("⚠️  IC < 0.02: 模型预测能力较弱，建议优化特征或模型")
+        passed = False
+    else:
+        print(f"✓ IC = {ic_analysis['IC']:.4f}: 模型预测能力可接受")
+
+    if ic_analysis['ICIR'] < 0.1:
+        print("⚠️  ICIR < 0.1: IC 不稳定，建议增加训练数据")
+        passed = False
+    else:
+        print(f"✓ ICIR = {ic_analysis['ICIR']:.4f}: IC 稳定性可接受")
+
+    if analysis['sharpe'] < 0.5:
+        print("⚠️  Sharpe < 0.5: 风险调整后收益较低")
+        passed = False
+    else:
+        print(f"✓ Sharpe = {analysis['sharpe']:.2f}: 风险收益比可接受")
+
+    if analysis['max_drawdown'] > 0.3:
+        print("⚠️  Max Drawdown > 30%: 最大回撤过大")
+        passed = False
+    else:
+        print(f"✓ Max Drawdown = {analysis['max_drawdown']:.2%}: 回撤可接受")
+
+    print("\n" + "=" * 60)
+    if passed:
+        print("✓ 模型验收通过，可进入 Hummingbot Paper Trading 阶段")
+    else:
+        print("✗ 模型验收未通过，建议优化后重新回测")
+    print("=" * 60)
+
+    return {
+        "ic_analysis": ic_analysis,
+        "portfolio_analysis": analysis,
+        "predictions": predictions,
+        "passed": passed,
+    }
+
+
+def calculate_ic(predictions: pd.Series, dataset: DatasetH) -> dict:
+    """
+    计算 IC 相关指标
+
+    Parameters
+    ----------
+    predictions : pd.Series
+        模型预测值
+    dataset : DatasetH
+        数据集 (包含 label)
+
+    Returns
+    -------
+    dict
+        IC, ICIR, Rank IC, Rank ICIR
+    """
+    # 获取真实标签
+    df_test = dataset.prepare("test", col_set=["label"])
+    labels = df_test["label"].reindex(predictions.index)
+
+    # 合并预测和标签
+    df = pd.DataFrame({
+        "prediction": predictions,
+        "label": labels,
+    }).dropna()
+
+    # 按时间分组计算 IC
+    ic_series = df.groupby(level=0).apply(
+        lambda x: x["prediction"].corr(x["label"])
+    )
+
+    # 计算 Rank IC
+    rank_ic_series = df.groupby(level=0).apply(
+        lambda x: x["prediction"].rank().corr(x["label"].rank())
+    )
+
+    return {
+        "IC": ic_series.mean(),
+        "ICIR": ic_series.mean() / (ic_series.std() + 1e-8),
+        "Rank IC": rank_ic_series.mean(),
+        "Rank ICIR": rank_ic_series.mean() / (rank_ic_series.std() + 1e-8),
+    }
+
+
+def analyze_results(portfolio_metric_dict: dict, indicator_dict: dict) -> dict:
+    """
+    分析回测结果
+
+    Parameters
+    ----------
+    portfolio_metric_dict : dict
+        组合指标
+    indicator_dict : dict
+        交易指标
+
+    Returns
+    -------
+    dict
+        分析结果
+    """
+    # 提取收益序列
+    returns = portfolio_metric_dict.get("return", pd.Series())
+
+    if len(returns) == 0:
+        return {
+            "annual_return": 0.0,
+            "sharpe": 0.0,
+            "max_drawdown": 0.0,
+            "information_ratio": 0.0,
+            "win_rate": 0.0,
+        }
+
+    # 计算指标
+    annual_return = returns.mean() * 252  # 假设日频
+    sharpe = returns.mean() / (returns.std() + 1e-8) * np.sqrt(252)
+
+    # 最大回撤
+    cumulative = (1 + returns).cumprod()
+    running_max = cumulative.expanding().max()
+    drawdown = (cumulative - running_max) / running_max
+    max_drawdown = abs(drawdown.min())
+
+    # 胜率
+    win_rate = (returns > 0).sum() / len(returns) if len(returns) > 0 else 0
+
+    # 信息比率 (相对基准)
+    excess_returns = returns - returns.mean()
+    information_ratio = excess_returns.mean() / (excess_returns.std() + 1e-8) * np.sqrt(252)
+
+    return {
+        "annual_return": annual_return,
+        "sharpe": sharpe,
+        "max_drawdown": max_drawdown,
+        "information_ratio": information_ratio,
+        "win_rate": win_rate,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Qlib Backtest for Crypto")
+    parser.add_argument("--qlib-data-path", type=str, default="~/.qlib/qlib_data/crypto_data")
+    parser.add_argument("--model-path", type=str, default="~/.qlib/models/lgb_model.pkl")
+    parser.add_argument("--instruments", type=str, nargs="+", default=["btcusdt", "ethusdt"])
+    parser.add_argument("--test-start", type=str, default="2024-07-01")
+    parser.add_argument("--test-end", type=str, default="2024-12-31")
+    parser.add_argument("--freq", type=str, default="1h")
+    parser.add_argument("--topk", type=int, default=1)
+    parser.add_argument("--benchmark", type=str, default="btcusdt")
+
+    args = parser.parse_args()
+
+    run_backtest(
+        qlib_data_path=args.qlib_data_path,
+        model_path=args.model_path,
+        instruments=args.instruments,
+        test_start=args.test_start,
+        test_end=args.test_end,
+        freq=args.freq,
+        topk=args.topk,
+        benchmark=args.benchmark,
+    )
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### 6.3 回测指标说明
+
+| 指标 | 含义 | 通过标准 |
+|------|------|----------|
+| **IC** | 预测值与实际收益的相关系数 | > 0.02 |
+| **ICIR** | IC 的信息比率 (IC均值/IC标准差) | > 0.1 |
+| **Rank IC** | 预测排名与实际排名的相关系数 | > 0.02 |
+| **年化收益率** | 年化后的策略收益率 | > 0 |
+| **夏普比率** | 风险调整后收益 | > 0.5 |
+| **最大回撤** | 最大亏损幅度 | < 30% |
+
+### 6.4 Qlib 回测 vs Hummingbot Paper Trading
+
+| 对比维度 | Qlib 回测 | Hummingbot Paper Trading |
+|----------|-----------|--------------------------|
+| **目的** | 验证模型/因子有效性 | 验证执行逻辑 |
+| **数据** | 历史数据 (.bin) | 实时行情 (API) |
+| **速度** | 秒级 (快速迭代) | 1:1 实时 |
+| **指标** | IC, ICIR, Sharpe | PnL, 胜率 |
+| **适用阶段** | 模型开发阶段 | 上线前验证 |
+
+---
+
+## 7. 策略脚本 (Strategy V2)
 
 > **重要**: v8.0.0 采用 Hummingbot 官方推荐的 Strategy V2 架构，
 > 使用 `StrategyV2Base` + `Executors` + `MarketDataProvider`。
@@ -1138,9 +1532,9 @@ class QlibAlphaStrategy(StrategyV2Base):
 
 ---
 
-## 7. 配置文件
+## 8. 配置文件
 
-### 7.1 控制器配置
+### 8.1 控制器配置
 
 **文件路径**: `conf/controllers/qlib_alpha.yml`
 
@@ -1175,7 +1569,7 @@ cooldown_interval: 60      # 60秒冷却
 max_executors_per_side: 1  # 每方向最多1个执行器
 ```
 
-### 7.2 策略配置
+### 8.2 策略配置
 
 **文件路径**: `conf/scripts/qlib_alpha_v2.yml`
 
@@ -1208,9 +1602,9 @@ controllers_config:
 
 ---
 
-## 8. 启动与运行
+## 9. 启动与运行
 
-### 8.1 完整运行流程
+### 9.1 完整运行流程
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -1232,19 +1626,27 @@ controllers_config:
 │      --instruments btcusdt ethusdt \                       │
 │      --freq 1h                                             │
 │                                                             │
-│  Step 3: 配置 API                                           │
+│  Step 3: Qlib 回测 (模型验证) ← 新增                        │
+│  $ python scripts/backtest_model.py \                      │
+│      --instruments btcusdt ethusdt \                       │
+│      --test-start 2024-07-01 \                             │
+│      --test-end 2024-12-31                                 │
+│  - 验证 IC > 0.02, Sharpe > 0.5                            │
+│  - 通过后进入下一步                                        │
+│                                                             │
+│  Step 4: 配置 API                                           │
 │  $ cd hummingbot && ./start                                │
 │  >>> connect binance                                        │
 │  >>> [输入 API Key 和 Secret]                               │
 │                                                             │
-│  Step 4: 启动 V2 策略                                       │
+│  Step 5: 启动 V2 策略                                       │
 │  >>> start --script qlib_alpha_strategy.py \               │
 │            --conf conf/scripts/qlib_alpha_v2.yml           │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 8.2 命令参考
+### 9.2 命令参考
 
 ```bash
 # 数据准备 (可选参数)
@@ -1266,6 +1668,15 @@ python scripts/train_model.py \
     --valid-end 2024-12-31 \
     --freq 1h
 
+# Qlib 回测 (模型验证)
+python scripts/backtest_model.py \
+    --qlib-data-path ~/.qlib/qlib_data/crypto_data \
+    --model-path ~/.qlib/models/lgb_model.pkl \
+    --instruments btcusdt ethusdt \
+    --test-start 2024-07-01 \
+    --test-end 2024-12-31 \
+    --freq 1h
+
 # 启动 V2 策略
 cd hummingbot
 ./start
@@ -1273,7 +1684,7 @@ cd hummingbot
 >>> start --script qlib_alpha_strategy.py --conf conf/scripts/qlib_alpha_v2.yml
 ```
 
-### 8.3 Paper Trading
+### 9.3 Paper Trading
 
 ```bash
 # 使用 Binance Testnet
@@ -1283,24 +1694,25 @@ cd hummingbot
 
 ---
 
-## 9. 验收标准
+## 10. 验收标准
 
-### 9.1 验收清单
+### 10.1 验收清单
 
 | 序号 | 验收项 | 验收方法 | 通过标准 |
 |------|--------|----------|----------|
 | 1 | Qlib 修改 | 导入 REG_CRYPTO | 无报错 |
 | 2 | 数据准备 | 运行 prepare_crypto_data.py | 生成 Qlib 格式数据 |
 | 3 | 模型训练 | 运行 train_model.py | 模型文件生成 |
-| 4 | Qlib 初始化 | Controller 启动 | region=crypto |
-| 5 | MarketDataProvider | Controller 运行 | get_candles_df() 返回数据 |
-| 6 | 特征计算 | Controller 运行 | 特征矩阵非空 |
-| 7 | 信号生成 | Controller 运行 | 返回 -1/0/1 |
-| 8 | PositionExecutor | 策略运行 | Executor 创建成功 |
-| 9 | 三重屏障 | 触发条件 | Executor 自动关闭 |
-| 10 | Paper Trading | 模拟交易 24h | 无异常 |
+| 4 | **Qlib 回测** | 运行 backtest_model.py | IC > 0.02, Sharpe > 0.5 |
+| 5 | Qlib 初始化 | Controller 启动 | region=crypto |
+| 6 | MarketDataProvider | Controller 运行 | get_candles_df() 返回数据 |
+| 7 | 特征计算 | Controller 运行 | 特征矩阵非空 |
+| 8 | 信号生成 | Controller 运行 | 返回 -1/0/1 |
+| 9 | PositionExecutor | 策略运行 | Executor 创建成功 |
+| 10 | 三重屏障 | 触发条件 | Executor 自动关闭 |
+| 11 | Paper Trading | 模拟交易 24h | 无异常 |
 
-### 9.2 验证脚本
+### 10.2 验证脚本
 
 ```python
 # scripts/verify_integration.py
@@ -1391,6 +1803,15 @@ aiohttp >= 3.8.0
 | Controller 未找到 | 检查 controllers/ 目录和导入路径 |
 
 ### C. 变更日志
+
+**v8.1.0** (2026-01-02)
+- **新增**: Qlib 回测模块集成 (第 6 节)
+- 新增 `scripts/backtest_model.py` 回测脚本
+- 支持 IC/ICIR/Sharpe/MaxDrawdown 等指标计算
+- 使用 TopkDropoutStrategy 进行策略回测
+- 明确两阶段验证流程: Qlib 回测 → Hummingbot Paper Trading
+- 更新运行流程，新增 Step 3 回测验证步骤
+- 更新验收清单，新增回测验收项
 
 **v8.0.2** (2026-01-02)
 - 添加 Alpha158 默认 Label 定义说明 (`Ref($close, -2) / Ref($close, -1) - 1`)
