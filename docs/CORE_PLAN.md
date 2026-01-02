@@ -1,6 +1,6 @@
 # AlgVex 核心方案 (P0 - MVP)
 
-> **版本**: v6.0.0 (2026-01-02)
+> **版本**: v6.1.0 (2026-01-02)
 > **状态**: 可直接运行的完整方案
 
 > **Qlib + Hummingbot 融合的加密货币现货量化交易平台**
@@ -312,7 +312,12 @@ def save_to_qlib_format(
         for col in qlib_columns:
             col_name = col.replace("$", "")
             file_path = inst_dir / f"{col_name}.bin"
-            inst_df[col].values.astype(np.float32).tofile(file_path)
+
+            # Qlib .bin 格式: [start_index (float32)] + [data (float32...)]
+            # start_index 表示数据在日历中的起始位置
+            data = inst_df[col].values.astype(np.float32)
+            start_index = np.array([0], dtype=np.float32)  # 从索引 0 开始
+            np.hstack([start_index, data]).tofile(file_path)
 
     # 保存日历
     calendar_file = calendars_dir / calendar_filename
@@ -616,6 +621,8 @@ from qlib.config import C
 from hummingbot.client.config.config_data_types import BaseClientModel
 from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
 from hummingbot.core.data_type.common import OrderType, TradeType, PositionAction
+from hummingbot.data_feed.candles_feed.candles_factory import CandlesFactory
+from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 
 
 # =============================================================================
@@ -686,6 +693,10 @@ class QlibAlphaStrategy(ScriptStrategyBase):
         self.entry_price = Decimal("0")
         self.entry_time = 0
 
+        # K 线数据源 (使用 CandlesFactory)
+        self.candles_feed = None
+        self._init_candles_feed()
+
         # 初始化
         self._init_qlib()
         self._load_model()
@@ -693,6 +704,20 @@ class QlibAlphaStrategy(ScriptStrategyBase):
     # =========================================================================
     # 初始化
     # =========================================================================
+
+    def _init_candles_feed(self):
+        """初始化 K 线数据源"""
+        try:
+            candles_config = CandlesConfig(
+                connector=self.config.exchange,
+                trading_pair=self.config.trading_pair,
+                interval=self.config.prediction_interval,
+                max_records=self.config.lookback_bars,
+            )
+            self.candles_feed = CandlesFactory.get_candle(candles_config)
+            self.logger.info(f"Candles feed initialized: {self.config.trading_pair}")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize candles feed: {e}")
 
     def _init_qlib(self):
         """初始化 Qlib (运行时配置，无需改源码)"""
@@ -792,19 +817,20 @@ class QlibAlphaStrategy(ScriptStrategyBase):
             return 0
 
     def _get_candles(self) -> Optional[pd.DataFrame]:
-        """获取 K 线数据"""
-        connector = self.connectors.get(self.config.exchange)
-        if connector is None:
-            return None
+        """
+        获取 K 线数据
 
-        # 使用 Hummingbot 的 K 线接口
+        使用初始化时创建的 CandlesFactory 数据源
+        """
         try:
-            candles = connector.get_candles(
-                trading_pair=self.config.trading_pair,
-                interval=self.config.prediction_interval,
-                max_records=self.config.lookback_bars,
-            )
-            return candles
+            # 使用初始化时创建的 candles_feed
+            if self.candles_feed is None:
+                return None
+
+            # CandlesBase 对象提供 candles_df 属性
+            if self.candles_feed.is_ready:
+                return self.candles_feed.candles_df
+            return None
         except Exception as e:
             self.logger.debug(f"Failed to get candles: {e}")
             return None
@@ -1180,6 +1206,11 @@ aiohttp >= 3.8.0
 | 订单执行失败 | 检查 API 权限、余额 |
 
 ### C. 变更日志
+
+**v6.1.0** (2026-01-02)
+- 修复 K 线数据获取方式：使用 CandlesFactory 替代不存在的 connector.get_candles()
+- 修复 Qlib .bin 文件格式：添加起始索引字节
+- 添加 _init_candles_feed() 初始化方法
 
 **v6.0.0** (2026-01-02)
 - 完全重写方案，采用零源码修改架构
