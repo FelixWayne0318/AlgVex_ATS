@@ -1,6 +1,6 @@
 # AlgVex 核心方案 (P0 - MVP)
 
-> **版本**: v8.2.0 (2026-01-02)
+> **版本**: v8.2.1 (2026-01-02)
 > **状态**: 可直接运行的完整方案
 
 > **Qlib + Hummingbot 融合的加密货币现货量化交易平台**
@@ -1064,8 +1064,11 @@ def analyze_results(portfolio_metric_dict: dict, indicator_dict: dict) -> dict:
         }
 
     # 计算指标
-    annual_return = returns.mean() * 252  # 假设日频
-    sharpe = returns.mean() / (returns.std() + 1e-8) * np.sqrt(252)
+    # 加密货币 24/7 交易，小时频率: 365 * 24 = 8760
+    # 如需支持多频率，可根据 freq 参数动态计算
+    periods_per_year = 8760  # 小时频率 (1h)
+    annual_return = returns.mean() * periods_per_year
+    sharpe = returns.mean() / (returns.std() + 1e-8) * np.sqrt(periods_per_year)
 
     # 最大回撤
     cumulative = (1 + returns).cumprod()
@@ -1078,7 +1081,7 @@ def analyze_results(portfolio_metric_dict: dict, indicator_dict: dict) -> dict:
 
     # 信息比率 (相对基准)
     excess_returns = returns - returns.mean()
-    information_ratio = excess_returns.mean() / (excess_returns.std() + 1e-8) * np.sqrt(252)
+    information_ratio = excess_returns.mean() / (excess_returns.std() + 1e-8) * np.sqrt(periods_per_year)
 
     return {
         "annual_return": annual_return,
@@ -1146,7 +1149,7 @@ if __name__ == "__main__":
 > **重要**: v8.0.0 采用 Hummingbot 官方推荐的 Strategy V2 架构，
 > 使用 `StrategyV2Base` + `Executors` + `MarketDataProvider`。
 
-### 6.1 控制器代码
+### 7.1 控制器代码
 
 **文件路径**: `controllers/qlib_alpha_controller.py`
 
@@ -1468,7 +1471,7 @@ class QlibAlphaController(ControllerBase):
         ]
 ```
 
-### 6.2 策略脚本代码
+### 7.2 策略脚本代码
 
 **文件路径**: `scripts/qlib_alpha_strategy.py`
 
@@ -1574,7 +1577,7 @@ class QlibAlphaStrategy(StrategyV2Base):
         return "\n".join(lines)
 ```
 
-### 6.3 V2 vs V1 架构对比
+### 7.3 V2 vs V1 架构对比
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -2060,6 +2063,12 @@ aiohttp >= 3.8.0
 | Controller 未找到 | 检查 controllers/ 目录和导入路径 |
 
 ### C. 变更日志
+
+**v8.2.1** (2026-01-02)
+- **修复**: 章节编号错误 (第 7 节子章节 6.1/6.2/6.3 → 7.1/7.2/7.3)
+- **修复**: 年化计算因子 (252 日频 → 8760 小时频率)
+  - 加密货币 24/7 交易，使用 365×24=8760 作为年化因子
+  - Sharpe Ratio 和 Information Ratio 计算现已正确
 
 **v8.2.0** (2026-01-02)
 - **增强**: 数据验证脚本 `verify_integration.py`
