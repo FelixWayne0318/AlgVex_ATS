@@ -1,6 +1,6 @@
 # AlgVex 核心方案 (P0 - MVP)
 
-> **版本**: v8.2.1 (2026-01-02)
+> **版本**: v9.0.0 (2026-01-02)
 > **状态**: 可直接运行的完整方案
 
 > **Qlib + Hummingbot 融合的加密货币现货量化交易平台**
@@ -33,13 +33,13 @@
 │                      核心原则                                │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│  1. 混合修改策略                                             │
-│     - Qlib: 修改源码，添加 REG_CRYPTO 区域支持              │
+│  1. 零修改策略 (v9.0.0)                                       │
+│     - Qlib: 运行时配置覆盖，无需修改源码                    │
 │     - Hummingbot: 零修改，使用 Strategy V2 框架             │
 │                                                             │
-│  2. 原生支持优于 Workaround                                  │
-│     - Qlib 原生支持加密货币，无需运行时覆盖配置             │
-│     - Hummingbot 使用官方推荐的 V2 架构                     │
+│  2. 统一特征计算 (v9.0.0 修复)                               │
+│     - 训练和实盘使用完全相同的特征计算函数                  │
+│     - 保存归一化参数，确保预测时使用相同分布                │
 │                                                             │
 │  3. V2 架构优势                                              │
 │     - 数据获取: MarketDataProvider 统一接口                 │
@@ -94,9 +94,10 @@
 
 | 组件 | 修改类型 | 文件数 | 说明 |
 |------|----------|--------|------|
-| **Qlib** | 修改源码 | 2 | 添加 REG_CRYPTO 区域 |
+| **Qlib** | 运行时配置 (推荐) | 0 | 使用 `qlib.config.C` 覆盖 |
+| **Qlib** | 修改源码 (可选) | 2 | 添加 REG_CRYPTO 区域 |
 | **Hummingbot** | 零修改 | 0 | 使用 Strategy V2 框架 |
-| **新建脚本** | 新建 | 6 | 数据/训练/回测/策略/控制器/配置 |
+| **新建脚本** | 新建 | 8 | 特征/数据/训练/回测/策略/控制器/配置×2 |
 
 ---
 
@@ -113,12 +114,14 @@
 
 | 序号 | 文件路径 | 类型 | 说明 |
 |------|----------|------|------|
-| 1 | `scripts/prepare_crypto_data.py` | 新建 | 数据准备脚本 |
-| 2 | `scripts/train_model.py` | 新建 | 模型训练脚本 |
-| 3 | `scripts/backtest_model.py` | 新建 | Qlib 回测脚本 |
-| 4 | `scripts/qlib_alpha_strategy.py` | 新建 | V2 策略主脚本 |
-| 5 | `controllers/qlib_alpha_controller.py` | 新建 | Qlib 信号控制器 |
-| 6 | `conf/controllers/qlib_alpha.yml` | 新建 | 策略配置 |
+| 1 | `scripts/unified_features.py` | 新建 | **统一特征计算模块** (训练/实盘共用) |
+| 2 | `scripts/prepare_crypto_data.py` | 新建 | 数据准备脚本 |
+| 3 | `scripts/train_model.py` | 新建 | 模型训练脚本 |
+| 4 | `scripts/backtest_model.py` | 新建 | Qlib 回测脚本 |
+| 5 | `scripts/qlib_alpha_strategy.py` | 新建 | V2 策略主脚本 |
+| 6 | `controllers/qlib_alpha_controller.py` | 新建 | Qlib 信号控制器 |
+| 7 | `conf/controllers/qlib_alpha.yml` | 新建 | 控制器配置 |
+| 8 | `conf/scripts/qlib_alpha_v2.yml` | 新建 | 策略配置 |
 
 ### 2.3 Hummingbot
 
@@ -128,9 +131,59 @@
 
 ---
 
-## 3. Qlib 修改
+## 3. Qlib 配置
 
-### 3.1 修改 constant.py
+> **v9.0.0 更新**: 提供两种配置方式，推荐使用方案 A (运行时配置覆盖)。
+
+### 3.0 方案选择
+
+| 方案 | 优点 | 缺点 | 推荐场景 |
+|------|------|------|----------|
+| **A: 运行时覆盖** | 无需修改源码，升级 Qlib 无忧 | 每次 init 需传入额外参数 | ✅ 推荐 |
+| **B: 修改源码** | 使用更简洁 | 需维护 fork，升级需合并 | 需贡献上游时 |
+
+### 3.1 方案 A: 运行时配置覆盖 (推荐)
+
+> 此方案**无需修改 Qlib 源码**，使用 `qlib.config.C` 运行时覆盖配置。
+
+```python
+import qlib
+from qlib.config import C
+
+def init_qlib_crypto(provider_uri: str):
+    """
+    初始化 Qlib 用于加密货币 (无需修改源码)
+    """
+    # 使用 US 区域作为基础 (因为 US 也没有涨跌停限制)
+    qlib.init(provider_uri=provider_uri, region="us")
+
+    # 运行时覆盖配置
+    C["trade_unit"] = 0.00001       # 加密货币最小交易单位
+    C["limit_threshold"] = None     # 无涨跌停限制
+    C["deal_price"] = "close"       # 收盘价成交
+    C["time_per_step"] = "60min"    # 小时级数据
+
+    print(f"Qlib initialized for crypto (provider: {provider_uri})")
+    print(f"  trade_unit: {C['trade_unit']}")
+    print(f"  limit_threshold: {C['limit_threshold']}")
+```
+
+**使用示例:**
+
+```python
+# 在训练脚本中
+init_qlib_crypto("~/.qlib/qlib_data/crypto_data")
+
+# 正常使用 Qlib API
+from qlib.data import D
+df = D.features(instruments=["btcusdt"], fields=["$close"], ...)
+```
+
+### 3.2 方案 B: 修改源码 (可选)
+
+> 如果你计划将修改贡献到 Qlib 上游，可以使用此方案。
+
+#### 3.2.1 修改 constant.py
 
 **文件路径**: `qlib/qlib/constant.py`
 
@@ -157,7 +210,7 @@ REG_CRYPTO = "crypto"
 +REG_CRYPTO = "crypto"
 ```
 
-### 3.2 修改 config.py
+#### 3.2.2 修改 config.py
 
 **文件路径**: `qlib/qlib/config.py`
 
@@ -186,12 +239,12 @@ REG_CRYPTO = "crypto"
 +        "trade_unit": 0.00001,      # 加密货币最小交易单位
 +        "limit_threshold": None,    # 无涨跌停限制
 +        "deal_price": "close",
-+        "time_per_step": 60,        # 分钟级数据
++        "time_per_step": "60min",   # Qlib 要求字符串格式
 +    },
  }
 ```
 
-### 3.3 验证修改
+#### 3.2.3 验证修改
 
 ```python
 # 验证 Qlib 加密货币支持
@@ -557,84 +610,276 @@ if __name__ == "__main__":
 
 ## 5. 模型训练
 
-### 5.1 Alpha158 适配策略
+### 5.1 统一特征方案 (v9.0.0 重大修复)
 
-> **说明**: Alpha158 是为 A 股市场设计的 158 个因子集合，
-> 直接用于加密货币需要注意适配问题。
-
-**潜在问题:**
-
-| 问题 | 说明 | 解决方案 |
-|------|------|----------|
-| **股票特有因子** | 换手率、市盈率等加密货币没有 | Alpha158 仅使用 OHLCV，无此问题 |
-| **时间窗口** | 5/10/20/30/60 基于交易日 | 加密货币 24/7，窗口改为小时 |
-| **交易日历** | 股票有休市日 | 加密货币使用连续时间戳 |
-
-**本方案的适配策略:**
+> **重要**: v9.0.0 修复了训练/实盘特征不一致的致命问题。
+> 训练和实盘现在使用**完全相同**的特征计算逻辑。
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                  Alpha158 适配策略                           │
+│              统一特征方案 (v9.0.0)                           │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│  训练阶段 (使用完整 Alpha158):                               │
-│  ─────────────────────────────                              │
-│  - 使用 Qlib 原生 Alpha158 Handler                         │
-│  - 158 个因子全部计算                                       │
-│  - 自动处理缺失值和标准化                                   │
+│  ❌ 旧方案 (v8.x - 有致命缺陷):                             │
+│  ───────────────────────────────                            │
+│  训练: Alpha158 Handler (158个因子 + Qlib预处理)           │
+│  实盘: 手动计算 (~50个因子, 无预处理)                       │
+│  问题: 特征维度不匹配，模型预测无意义                       │
 │                                                             │
-│  实盘阶段 (使用简化因子集):                                  │
-│  ─────────────────────────────                              │
-│  - 手动计算核心因子 (~50 个)                                │
-│  - 排除股票特有逻辑                                         │
-│  - 保持与训练特征对齐                                       │
-│                                                             │
-│  原因:                                                       │
-│  - Alpha158 内部有股票市场假设 (如交易日历)                 │
-│  - 实盘需要更快的计算速度                                   │
-│  - 简化因子集更易于调试和维护                               │
+│  ✅ 新方案 (v9.0.0 - 已修复):                               │
+│  ───────────────────────────────                            │
+│  训练: UnifiedCryptoHandler (59个因子 + 统一预处理)        │
+│  实盘: 相同的 compute_unified_features() 函数               │
+│  保证: 特征列名、顺序、归一化完全一致                       │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**核心因子保留:**
+**统一因子列表 (59 个):**
 
-- **KBAR 类** (9 个): KMID, KLEN, KMID2, KUP, KUP2, KLOW, KLOW2, KSFT, KSFT2
-- **ROC/MA/STD** (5 个周期 × 10 类): ROC, MA, STD, MAX, MIN, QTLU, QTLD, RSV, CORR, CORD
-- **总计**: ~50+ 个核心因子，覆盖 Alpha158 的主要信息
+| 类别 | 因子名 | 数量 |
+|------|--------|------|
+| **KBAR** | KMID, KLEN, KMID2, KUP, KUP2, KLOW, KLOW2, KSFT, KSFT2 | 9 |
+| **ROC** | ROC5, ROC10, ROC20, ROC30, ROC60 | 5 |
+| **MA** | MA5, MA10, MA20, MA30, MA60 | 5 |
+| **STD** | STD5, STD10, STD20, STD30, STD60 | 5 |
+| **MAX** | MAX5, MAX10, MAX20, MAX30, MAX60 | 5 |
+| **MIN** | MIN5, MIN10, MIN20, MIN30, MIN60 | 5 |
+| **QTLU** | QTLU5, QTLU10, QTLU20, QTLU30, QTLU60 | 5 |
+| **QTLD** | QTLD5, QTLD10, QTLD20, QTLD30, QTLD60 | 5 |
+| **RSV** | RSV5, RSV10, RSV20, RSV30, RSV60 | 5 |
+| **CORR** | CORR5, CORR10, CORR20, CORR30, CORR60 | 5 |
+| **CORD** | CORD5, CORD10, CORD20, CORD30, CORD60 | 5 |
+| **总计** | | **59** |
 
-### 5.2 脚本代码
+**关键保证:**
+
+1. **特征列顺序固定** - 训练时保存列名顺序，预测时严格遵循
+2. **归一化参数保存** - 训练时保存均值/标准差，预测时使用相同参数
+3. **单一代码路径** - `compute_unified_features()` 函数在训练和实盘共用
+
+### 5.2 统一特征计算模块
+
+**文件路径**: `scripts/unified_features.py`
+
+> **重要**: 此模块被训练脚本和实盘控制器共同引用，确保特征一致性。
+
+```python
+"""
+统一特征计算模块
+
+训练和实盘共用此模块，确保特征计算完全一致。
+
+用法:
+    from unified_features import compute_unified_features, FEATURE_COLUMNS
+"""
+
+import numpy as np
+import pandas as pd
+from typing import Tuple, Optional
+
+# 固定的特征列顺序 (训练和预测必须一致)
+FEATURE_COLUMNS = [
+    # KBAR 类 (9)
+    "KMID", "KLEN", "KMID2", "KUP", "KUP2", "KLOW", "KLOW2", "KSFT", "KSFT2",
+    # ROC 类 (5)
+    "ROC5", "ROC10", "ROC20", "ROC30", "ROC60",
+    # MA 类 (5)
+    "MA5", "MA10", "MA20", "MA30", "MA60",
+    # STD 类 (5)
+    "STD5", "STD10", "STD20", "STD30", "STD60",
+    # MAX 类 (5)
+    "MAX5", "MAX10", "MAX20", "MAX30", "MAX60",
+    # MIN 类 (5)
+    "MIN5", "MIN10", "MIN20", "MIN30", "MIN60",
+    # QTLU 类 (5)
+    "QTLU5", "QTLU10", "QTLU20", "QTLU30", "QTLU60",
+    # QTLD 类 (5)
+    "QTLD5", "QTLD10", "QTLD20", "QTLD30", "QTLD60",
+    # RSV 类 (5)
+    "RSV5", "RSV10", "RSV20", "RSV30", "RSV60",
+    # CORR 类 (5)
+    "CORR5", "CORR10", "CORR20", "CORR30", "CORR60",
+    # CORD 类 (5)
+    "CORD5", "CORD10", "CORD20", "CORD30", "CORD60",
+]
+
+
+def compute_unified_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    计算统一特征集
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        必须包含: open, high, low, close, volume 列
+
+    Returns
+    -------
+    pd.DataFrame
+        特征矩阵，列顺序固定为 FEATURE_COLUMNS
+    """
+    close = df["close"].astype(float)
+    open_ = df["open"].astype(float)
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    volume = df["volume"].astype(float)
+
+    features = pd.DataFrame(index=df.index)
+
+    # KBAR 类因子
+    features["KMID"] = (close - open_) / open_
+    features["KLEN"] = (high - low) / open_
+    features["KMID2"] = (close - open_) / (high - low + 1e-12)
+    features["KUP"] = (high - np.maximum(open_, close)) / open_
+    features["KUP2"] = (high - np.maximum(open_, close)) / (high - low + 1e-12)
+    features["KLOW"] = (np.minimum(open_, close) - low) / open_
+    features["KLOW2"] = (np.minimum(open_, close) - low) / (high - low + 1e-12)
+    features["KSFT"] = (2 * close - high - low) / open_
+    features["KSFT2"] = (2 * close - high - low) / (high - low + 1e-12)
+
+    # 多周期因子
+    for d in [5, 10, 20, 30, 60]:
+        features[f"ROC{d}"] = close / close.shift(d) - 1
+        ma = close.rolling(d).mean()
+        features[f"MA{d}"] = close / ma - 1
+        features[f"STD{d}"] = close.rolling(d).std() / close
+        features[f"MAX{d}"] = close / high.rolling(d).max() - 1
+        features[f"MIN{d}"] = close / low.rolling(d).min() - 1
+        features[f"QTLU{d}"] = close / close.rolling(d).quantile(0.8) - 1
+        features[f"QTLD{d}"] = close / close.rolling(d).quantile(0.2) - 1
+        hh = high.rolling(d).max()
+        ll = low.rolling(d).min()
+        features[f"RSV{d}"] = (close - ll) / (hh - ll + 1e-12)
+        features[f"CORR{d}"] = close.rolling(d).corr(volume)
+        ret = close.pct_change()
+        features[f"CORD{d}"] = ret.rolling(d).corr(volume.pct_change())
+
+    # 确保列顺序一致
+    return features[FEATURE_COLUMNS]
+
+
+def compute_label(df: pd.DataFrame) -> pd.Series:
+    """
+    计算标签: t+1 时刻相对于当前的收益率
+
+    与 Qlib Alpha158 不同，我们使用 t+1 而非 t+2
+    因为加密货币没有 T+1 交易限制
+    """
+    close = df["close"].astype(float)
+    return close.shift(-1) / close - 1
+
+
+class FeatureNormalizer:
+    """
+    特征归一化器
+
+    训练时: fit_transform() 计算并保存均值/标准差
+    预测时: transform() 使用保存的参数
+    """
+
+    def __init__(self):
+        self.mean = None
+        self.std = None
+        self.fitted = False
+
+    def fit_transform(self, features: pd.DataFrame) -> pd.DataFrame:
+        """训练时使用: 计算统计量并归一化"""
+        self.mean = features.mean()
+        self.std = features.std() + 1e-8  # 避免除零
+        self.fitted = True
+        return (features - self.mean) / self.std
+
+    def transform(self, features: pd.DataFrame) -> pd.DataFrame:
+        """预测时使用: 使用保存的统计量归一化"""
+        if not self.fitted:
+            raise ValueError("Normalizer not fitted. Call fit_transform first.")
+        return (features - self.mean) / self.std
+
+    def save(self, path: str):
+        """保存归一化参数"""
+        import pickle
+        with open(path, "wb") as f:
+            pickle.dump({"mean": self.mean, "std": self.std}, f)
+
+    def load(self, path: str):
+        """加载归一化参数"""
+        import pickle
+        with open(path, "rb") as f:
+            params = pickle.load(f)
+        self.mean = params["mean"]
+        self.std = params["std"]
+        self.fitted = True
+```
+
+### 5.3 训练脚本
 
 **文件路径**: `scripts/train_model.py`
 
 ```python
 """
-模型训练脚本
+模型训练脚本 (v9.0.0)
 
-使用 Qlib 的 LGBModel 训练价格预测模型。
+使用统一特征计算，确保训练和实盘特征一致。
 
 用法:
     python scripts/train_model.py --instruments btcusdt ethusdt
 
-注意:
-    - freq 必须与实盘 prediction_interval 一致
-    - 使用 RobustZScoreNorm 而非 CSRankNorm (适合少量品种)
+重要变更 (v9.0.0):
+    - 不再使用 Alpha158 Handler
+    - 使用 unified_features.py 计算特征
+    - 保存归一化参数供实盘使用
 """
 
 import pickle
 import argparse
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+import lightgbm as lgb
+
 import qlib
-from qlib.constant import REG_CRYPTO
-from qlib.contrib.model.gbdt import LGBModel
-from qlib.contrib.data.handler import Alpha158
-from qlib.data.dataset import DatasetH
+from qlib.config import C
+from qlib.data import D
+
+# 导入统一特征模块
+from unified_features import (
+    compute_unified_features,
+    compute_label,
+    FeatureNormalizer,
+    FEATURE_COLUMNS,
+)
+
+
+def init_qlib_crypto(provider_uri: str):
+    """初始化 Qlib 用于加密货币 (无需修改源码)"""
+    qlib.init(provider_uri=provider_uri, region="us")
+    C["trade_unit"] = 0.00001
+    C["limit_threshold"] = None
+    C["time_per_step"] = "60min"
+
+
+def load_qlib_data(instruments: list, start_time: str, end_time: str, freq: str) -> pd.DataFrame:
+    """从 Qlib 加载原始 OHLCV 数据"""
+    fields = ["$open", "$high", "$low", "$close", "$volume"]
+
+    df = D.features(
+        instruments=instruments,
+        fields=fields,
+        start_time=start_time,
+        end_time=end_time,
+        freq=freq,
+    )
+
+    # 重命名列
+    df.columns = ["open", "high", "low", "close", "volume"]
+    return df
 
 
 def train_model(
     qlib_data_path: str,
-    output_path: str,
+    output_dir: str,
     instruments: list,
     train_start: str,
     train_end: str,
@@ -642,98 +887,133 @@ def train_model(
     valid_end: str,
     freq: str = "1h",
 ):
-    """
-    训练 LightGBM 模型
-    """
-    # 初始化 Qlib (使用 REG_CRYPTO 区域)
-    print("Initializing Qlib with REG_CRYPTO...")
+    """训练 LightGBM 模型"""
+
+    # 初始化 Qlib (使用运行时配置覆盖，无需修改源码)
+    print("Initializing Qlib for crypto...")
     data_path = Path(qlib_data_path).expanduser().resolve()
-    qlib.init(provider_uri=str(data_path), region=REG_CRYPTO)
+    init_qlib_crypto(str(data_path))
 
-    # 创建数据处理器
-    # 重要：freq 必须与实盘 prediction_interval 一致！
-    #
-    # Alpha158 默认 Label 定义 (Qlib 官方):
-    #   label = Ref($close, -2) / Ref($close, -1) - 1
-    #   即：预测 t+2 时刻相对于 t+1 时刻的收益率
-    #   这意味着模型学习的是"下下个周期的收益率"
-    #
-    print(f"Creating Alpha158 handler with freq={freq}...")
-    handler = Alpha158(
-        instruments=instruments,
-        start_time=train_start,
-        end_time=valid_end,
-        freq=freq,
-        infer_processors=[],  # 推理时不处理 label
-        learn_processors=[
-            {"class": "DropnaLabel"},
-            # RobustZScoreNorm 适合少量品种 (CSRankNorm 需要多品种)
-            {"class": "RobustZScoreNorm", "kwargs": {"fields_group": "label", "clip_outlier": True}},
-        ],
-    )
+    # 加载数据
+    print(f"Loading data for {instruments}...")
+    all_data = load_qlib_data(instruments, train_start, valid_end, freq)
+    print(f"Loaded {len(all_data)} records")
 
-    # 创建数据集
-    print("Creating dataset...")
-    dataset = DatasetH(
-        handler=handler,
-        segments={
-            "train": (train_start, train_end),
-            "valid": (valid_start, valid_end),
-        },
-    )
+    # 计算统一特征
+    print("Computing unified features...")
+    all_features = []
+    all_labels = []
 
-    # 创建模型
-    print("Creating LGBModel...")
-    model = LGBModel(
-        loss="mse",
-        early_stopping_rounds=50,
+    for inst in instruments:
+        inst_data = all_data.xs(inst, level="instrument")
+        features = compute_unified_features(inst_data)
+        labels = compute_label(inst_data)
+
+        # 添加时间索引
+        features["datetime"] = features.index
+        features["instrument"] = inst
+        labels.name = "label"
+
+        all_features.append(features)
+        all_labels.append(labels)
+
+    features_df = pd.concat(all_features)
+    labels_df = pd.concat(all_labels)
+
+    # 合并并清理
+    data = features_df.copy()
+    data["label"] = labels_df.values
+    data = data.dropna()
+
+    print(f"Features shape: {data.shape}")
+    print(f"Feature columns: {FEATURE_COLUMNS}")
+
+    # 分割训练/验证集
+    train_mask = data["datetime"] <= train_end
+    valid_mask = (data["datetime"] > train_end) & (data["datetime"] <= valid_end)
+
+    X_train = data.loc[train_mask, FEATURE_COLUMNS]
+    y_train = data.loc[train_mask, "label"]
+    X_valid = data.loc[valid_mask, FEATURE_COLUMNS]
+    y_valid = data.loc[valid_mask, "label"]
+
+    print(f"Train: {len(X_train)}, Valid: {len(X_valid)}")
+
+    # 归一化特征
+    print("Normalizing features...")
+    normalizer = FeatureNormalizer()
+    X_train_norm = normalizer.fit_transform(X_train)
+    X_valid_norm = normalizer.transform(X_valid)
+
+    # 训练 LightGBM
+    print("Training LightGBM model...")
+    train_data = lgb.Dataset(X_train_norm, label=y_train)
+    valid_data = lgb.Dataset(X_valid_norm, label=y_valid, reference=train_data)
+
+    params = {
+        "objective": "regression",
+        "metric": "mse",
+        "num_leaves": 63,
+        "learning_rate": 0.05,
+        "feature_fraction": 0.8,
+        "bagging_fraction": 0.8,
+        "bagging_freq": 5,
+        "verbose": -1,
+    }
+
+    model = lgb.train(
+        params,
+        train_data,
         num_boost_round=500,
-        num_leaves=63,
-        learning_rate=0.05,
-        feature_fraction=0.8,
-        bagging_fraction=0.8,
-        bagging_freq=5,
+        valid_sets=[valid_data],
+        callbacks=[lgb.early_stopping(50)],
     )
 
-    # 训练
-    print("Training model...")
-    model.fit(dataset)
+    # 保存模型和归一化参数
+    output_path = Path(output_dir).expanduser()
+    output_path.mkdir(parents=True, exist_ok=True)
 
-    # 保存
-    output_path = Path(output_path).expanduser()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    model_file = output_path / "lgb_model.txt"
+    normalizer_file = output_path / "normalizer.pkl"
+    columns_file = output_path / "feature_columns.pkl"
 
-    with open(output_path, "wb") as f:
-        pickle.dump(model, f)
+    model.save_model(str(model_file))
+    normalizer.save(str(normalizer_file))
+    with open(columns_file, "wb") as f:
+        pickle.dump(FEATURE_COLUMNS, f)
 
-    print(f"Model saved to {output_path}")
+    print(f"\nModel saved to {model_file}")
+    print(f"Normalizer saved to {normalizer_file}")
+    print(f"Feature columns saved to {columns_file}")
 
     # 验证
     print("\nValidating model...")
-    predictions = model.predict(dataset, segment="valid")
-    print(f"Predictions shape: {predictions.shape}")
+    predictions = model.predict(X_valid_norm)
     print(f"Predictions range: [{predictions.min():.6f}, {predictions.max():.6f}]")
-    print(f"Predictions sample:\n{predictions.head()}")
 
-    return model
+    # 计算 IC
+    ic = np.corrcoef(predictions, y_valid)[0, 1]
+    print(f"Validation IC: {ic:.4f}")
+
+    return model, normalizer
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train Qlib model for crypto")
+    parser = argparse.ArgumentParser(description="Train unified model for crypto")
     parser.add_argument("--qlib-data-path", type=str, default="~/.qlib/qlib_data/crypto_data")
-    parser.add_argument("--output", type=str, default="~/.qlib/models/lgb_model.pkl")
+    parser.add_argument("--output-dir", type=str, default="~/.qlib/models")
     parser.add_argument("--instruments", type=str, nargs="+", default=["btcusdt", "ethusdt"])
     parser.add_argument("--train-start", type=str, default="2023-01-01")
     parser.add_argument("--train-end", type=str, default="2024-06-30")
     parser.add_argument("--valid-start", type=str, default="2024-07-01")
     parser.add_argument("--valid-end", type=str, default="2024-12-31")
-    parser.add_argument("--freq", type=str, default="1h", help="Must match prediction_interval")
+    parser.add_argument("--freq", type=str, default="1h")
 
     args = parser.parse_args()
 
     train_model(
         qlib_data_path=args.qlib_data_path,
-        output_path=args.output,
+        output_dir=args.output_dir,
         instruments=args.instruments,
         train_start=args.train_start,
         train_end=args.train_end,
@@ -1155,14 +1435,20 @@ if __name__ == "__main__":
 
 ```python
 """
-Qlib Alpha 控制器
+Qlib Alpha 控制器 (v9.0.0)
 
-基于 Qlib 机器学习模型生成交易信号的控制器。
+基于统一特征计算的交易信号控制器。
 
 V2 架构中，Controller 负责:
 1. 从 MarketDataProvider 获取数据
-2. 计算特征和预测信号
-3. 生成 ExecutorAction 供策略执行
+2. 使用统一特征模块计算特征
+3. 应用相同的归一化参数
+4. 生成 ExecutorAction 供策略执行
+
+重要变更 (v9.0.0):
+- 使用 unified_features.py 计算特征，与训练完全一致
+- 加载训练时保存的归一化参数
+- 保证特征列顺序与训练一致
 """
 
 import pickle
@@ -1173,9 +1459,7 @@ from typing import List, Optional, Set
 
 import numpy as np
 import pandas as pd
-
-import qlib
-from qlib.constant import REG_CRYPTO
+import lightgbm as lgb
 
 from hummingbot.strategy_v2.controllers.controller_base import ControllerBase, ControllerConfigBase
 from hummingbot.strategy_v2.executors.executor_base import ExecutorBase
@@ -1183,6 +1467,7 @@ from hummingbot.strategy_v2.executors.position_executor.data_types import (
     PositionExecutorConfig,
     TrailingStop,
     TripleBarrierConfig,
+    TradeType,
 )
 from hummingbot.strategy_v2.models.executor_actions import (
     CreateExecutorAction,
@@ -1191,6 +1476,13 @@ from hummingbot.strategy_v2.models.executor_actions import (
 )
 from pydantic import Field
 
+# 导入统一特征模块
+from scripts.unified_features import (
+    compute_unified_features,
+    FeatureNormalizer,
+    FEATURE_COLUMNS,
+)
+
 
 class QlibAlphaControllerConfig(ControllerConfigBase):
     """
@@ -1198,6 +1490,7 @@ class QlibAlphaControllerConfig(ControllerConfigBase):
 
     使用 StrategyV2ConfigBase 风格的配置类
     """
+    id: str = Field(default="qlib_alpha_btc")  # 必需字段，用于 Executor 关联
     controller_name: str = "qlib_alpha"
     controller_type: str = "directional_trading"
 
@@ -1206,9 +1499,8 @@ class QlibAlphaControllerConfig(ControllerConfigBase):
     trading_pair: str = Field(default="BTC-USDT")
     order_amount_usd: Decimal = Field(default=Decimal("100"))
 
-    # 模型配置
-    model_path: str = Field(default="~/.qlib/models/lgb_model.pkl")
-    qlib_data_path: str = Field(default="~/.qlib/qlib_data/crypto_data")
+    # 模型配置 (v9.0.0: 改为目录，包含 model + normalizer)
+    model_dir: str = Field(default="~/.qlib/models")
 
     # 信号配置
     signal_threshold: Decimal = Field(default=Decimal("0.005"))
@@ -1227,12 +1519,13 @@ class QlibAlphaControllerConfig(ControllerConfigBase):
 
 class QlibAlphaController(ControllerBase):
     """
-    Qlib Alpha 控制器
+    Qlib Alpha 控制器 (v9.0.0)
 
     V2 架构中的核心组件，负责:
     1. 接收 MarketDataProvider 数据
-    2. 调用 Qlib 模型预测
-    3. 生成 PositionExecutor 动作
+    2. 使用统一特征模块计算特征 (与训练完全一致)
+    3. 应用训练时保存的归一化参数
+    4. 生成 PositionExecutor 动作
     """
 
     def __init__(self, config: QlibAlphaControllerConfig, *args, **kwargs):
@@ -1240,35 +1533,53 @@ class QlibAlphaController(ControllerBase):
         self.config = config
         self.logger = logging.getLogger(__name__)
 
-        # 模型状态
+        # 模型和归一化器
         self.model = None
-        self.qlib_initialized = False
+        self.normalizer = None
+        self.feature_columns = None
+        self.model_loaded = False
         self.last_signal_time = 0
 
-        # 初始化
-        self._init_qlib()
-        self._load_model()
+        # 加载模型和归一化参数
+        self._load_model_and_normalizer()
 
-    def _init_qlib(self):
-        """初始化 Qlib (使用 REG_CRYPTO 区域)"""
+    def _load_model_and_normalizer(self):
+        """加载模型、归一化参数和特征列顺序"""
         try:
-            qlib_path = Path(self.config.qlib_data_path).expanduser()
-            qlib.init(provider_uri=str(qlib_path), region=REG_CRYPTO)
-            self.qlib_initialized = True
-            self.logger.info("Qlib initialized with REG_CRYPTO")
-        except Exception as e:
-            self.logger.error(f"Failed to initialize Qlib: {e}")
+            model_dir = Path(self.config.model_dir).expanduser()
 
-    def _load_model(self):
-        """加载预训练模型"""
-        try:
-            model_path = Path(self.config.model_path).expanduser()
-            if model_path.exists():
-                with open(model_path, "rb") as f:
-                    self.model = pickle.load(f)
-                self.logger.info(f"Model loaded from {model_path}")
+            # 加载 LightGBM 模型
+            model_file = model_dir / "lgb_model.txt"
+            if model_file.exists():
+                self.model = lgb.Booster(model_file=str(model_file))
+                self.logger.info(f"Model loaded from {model_file}")
             else:
-                self.logger.warning(f"Model file not found: {model_path}")
+                self.logger.warning(f"Model file not found: {model_file}")
+                return
+
+            # 加载归一化参数
+            normalizer_file = model_dir / "normalizer.pkl"
+            if normalizer_file.exists():
+                self.normalizer = FeatureNormalizer()
+                self.normalizer.load(str(normalizer_file))
+                self.logger.info(f"Normalizer loaded from {normalizer_file}")
+            else:
+                self.logger.warning(f"Normalizer file not found: {normalizer_file}")
+                return
+
+            # 加载特征列顺序
+            columns_file = model_dir / "feature_columns.pkl"
+            if columns_file.exists():
+                with open(columns_file, "rb") as f:
+                    self.feature_columns = pickle.load(f)
+                self.logger.info(f"Feature columns loaded: {len(self.feature_columns)} features")
+            else:
+                # 使用默认列顺序
+                self.feature_columns = FEATURE_COLUMNS
+                self.logger.info("Using default feature columns")
+
+            self.model_loaded = True
+
         except Exception as e:
             self.logger.error(f"Failed to load model: {e}")
 
@@ -1325,14 +1636,14 @@ class QlibAlphaController(ControllerBase):
 
     def _get_signal(self) -> int:
         """
-        获取交易信号
+        获取交易信号 (v9.0.0: 使用统一特征)
 
         Returns
         -------
         int
             1=买入, -1=卖出, 0=持有
         """
-        if not self.qlib_initialized or self.model is None:
+        if not self.model_loaded:
             return 0
 
         candles = self.processed_data.get("candles")
@@ -1340,14 +1651,20 @@ class QlibAlphaController(ControllerBase):
             return 0
 
         try:
-            # 计算特征
-            features = self._compute_features(candles)
+            # 使用统一特征模块计算特征 (与训练完全一致)
+            features = compute_unified_features(candles)
             if features is None or features.empty:
                 return 0
 
+            # 确保列顺序与训练一致
+            features = features[self.feature_columns]
+
+            # 取最后一行并应用归一化
+            latest_features = features.iloc[-1:]
+            latest_features_norm = self.normalizer.transform(latest_features)
+
             # 预测
-            latest_features = features.iloc[-1:].values
-            prediction = self.model.model.predict(latest_features)[0]
+            prediction = self.model.predict(latest_features_norm.values)[0]
 
             # 根据阈值生成信号
             threshold = float(self.config.signal_threshold)
@@ -1363,53 +1680,6 @@ class QlibAlphaController(ControllerBase):
         except Exception as e:
             self.logger.error(f"Error getting signal: {e}")
             return 0
-
-    def _compute_features(self, candles: pd.DataFrame) -> Optional[pd.DataFrame]:
-        """计算 Alpha158 因子"""
-        try:
-            df = candles.copy()
-
-            close = df["close"].astype(float)
-            open_ = df["open"].astype(float)
-            high = df["high"].astype(float)
-            low = df["low"].astype(float)
-            volume = df["volume"].astype(float)
-
-            features = pd.DataFrame(index=df.index)
-
-            # KBAR 类因子
-            features["KMID"] = (close - open_) / open_
-            features["KLEN"] = (high - low) / open_
-            features["KMID2"] = (close - open_) / (high - low + 1e-12)
-            features["KUP"] = (high - np.maximum(open_, close)) / open_
-            features["KUP2"] = (high - np.maximum(open_, close)) / (high - low + 1e-12)
-            features["KLOW"] = (np.minimum(open_, close) - low) / open_
-            features["KLOW2"] = (np.minimum(open_, close) - low) / (high - low + 1e-12)
-            features["KSFT"] = (2 * close - high - low) / open_
-            features["KSFT2"] = (2 * close - high - low) / (high - low + 1e-12)
-
-            # ROC/MA/STD 因子
-            for d in [5, 10, 20, 30, 60]:
-                features[f"ROC{d}"] = close / close.shift(d) - 1
-                ma = close.rolling(d).mean()
-                features[f"MA{d}"] = close / ma - 1
-                features[f"STD{d}"] = close.rolling(d).std() / close
-                features[f"MAX{d}"] = close / high.rolling(d).max() - 1
-                features[f"MIN{d}"] = close / low.rolling(d).min() - 1
-                features[f"QTLU{d}"] = close / close.rolling(d).quantile(0.8) - 1
-                features[f"QTLD{d}"] = close / close.rolling(d).quantile(0.2) - 1
-                hh = high.rolling(d).max()
-                ll = low.rolling(d).min()
-                features[f"RSV{d}"] = (close - ll) / (hh - ll + 1e-12)
-                features[f"CORR{d}"] = close.rolling(d).corr(volume)
-                ret = close.pct_change()
-                features[f"CORD{d}"] = ret.rolling(d).corr(volume.pct_change())
-
-            return features.dropna()
-
-        except Exception as e:
-            self.logger.error(f"Error computing features: {e}")
-            return None
 
     def _create_position_executor(self, signal: int) -> Optional[CreateExecutorAction]:
         """
@@ -1443,7 +1713,7 @@ class QlibAlphaController(ControllerBase):
                 timestamp=self.market_data_provider.time(),
                 connector_name=self.config.connector_name,
                 trading_pair=self.config.trading_pair,
-                side="BUY" if signal > 0 else "SELL",
+                side=TradeType.BUY if signal > 0 else TradeType.SELL,
                 amount=amount,
                 triple_barrier_config=triple_barrier,
             )
@@ -1454,7 +1724,7 @@ class QlibAlphaController(ControllerBase):
             )
 
             return CreateExecutorAction(
-                controller_id=self.config.controller_name,
+                controller_id=self.config.id,  # 使用 id 字段而非 controller_name
                 executor_config=executor_config,
             )
 
@@ -1614,6 +1884,9 @@ class QlibAlphaStrategy(StrategyV2Base):
 ```yaml
 # Qlib Alpha V2 控制器配置
 
+# 控制器标识 (必需字段，用于 Executor 关联)
+id: qlib_alpha_btc
+
 # 控制器元信息
 controller_name: qlib_alpha
 controller_type: directional_trading
@@ -1623,9 +1896,8 @@ connector_name: binance
 trading_pair: BTC-USDT
 order_amount_usd: 100
 
-# 模型配置
-model_path: ~/.qlib/models/lgb_model.pkl
-qlib_data_path: ~/.qlib/qlib_data/crypto_data
+# 模型配置 (v9.0.0: 改为目录，包含 model + normalizer + feature_columns)
+model_dir: ~/.qlib/models
 
 # 信号配置
 signal_threshold: 0.005    # 0.5% 收益率阈值
@@ -1649,29 +1921,30 @@ max_executors_per_side: 1  # 每方向最多1个执行器
 ```yaml
 # Qlib Alpha V2 策略配置
 
-# V2 策略支持多控制器
-controllers_config:
-  - controller_name: qlib_alpha
-    controller_type: directional_trading
-    connector_name: binance
+# 市场配置 (用于数据订阅)
+markets:
+  binance:
+    - BTC-USDT
+    - ETH-USDT
+
+# K 线配置 (用于 MarketDataProvider)
+candles_config:
+  - connector: binance
     trading_pair: BTC-USDT
-    order_amount_usd: 100
-    model_path: ~/.qlib/models/lgb_model.pkl
-    qlib_data_path: ~/.qlib/qlib_data/crypto_data
-    signal_threshold: 0.005
-    prediction_interval: 1h
-    lookback_bars: 100
-    stop_loss: 0.02
-    take_profit: 0.03
-    time_limit: 3600
-    cooldown_interval: 60
-    max_executors_per_side: 1
+    interval: 1h
+    max_records: 100
+
+# V2 策略控制器配置
+# 格式: List[str] - 引用 conf/controllers/ 下的配置文件名
+controllers_config:
+  - qlib_alpha.yml
 
 # 可添加多个控制器实现多品种交易
-# - controller_name: qlib_alpha_eth
-#   trading_pair: ETH-USDT
-#   ...
+# - qlib_alpha_eth.yml
 ```
+
+> **重要**: `controllers_config` 使用 `List[str]` 格式，引用配置文件名而非内联 dict。
+> 这符合 Hummingbot 官方 V2 架构规范。
 
 ---
 
@@ -2063,6 +2336,26 @@ aiohttp >= 3.8.0
 | Controller 未找到 | 检查 controllers/ 目录和导入路径 |
 
 ### C. 变更日志
+
+**v9.0.0** (2026-01-02) - 重大修复版本
+- **P0 修复**: 统一训练/实盘特征计算 (致命缺陷修复)
+  - 新增 `scripts/unified_features.py` 统一特征模块
+  - 训练和实盘使用完全相同的 59 个因子
+  - 保存并加载归一化参数 (mean/std)
+  - 保存并加载特征列顺序
+  - 不再使用 Alpha158 Handler (避免特征不一致)
+- **P1 修复**: `time_per_step: 60` → `time_per_step: "60min"` (Qlib 要求字符串)
+- **P1 修复**: `side="BUY"/"SELL"` → `side=TradeType.BUY/TradeType.SELL` (枚举类型)
+- **P1 修复**: 添加 controller `id` 字段 (Executor 关联必需)
+- **P2 优化**: `controllers_config` 改为 `List[str]` 格式 (引用配置文件名)
+- **P2 优化**: 新增方案 A - 运行时配置覆盖 (无需修改 Qlib 源码)
+  - 使用 `qlib.config.C` 动态设置参数
+  - 升级 Qlib 无需重新合并修改
+- **文档**: 添加 `markets` 和 `candles_config` 配置 (官方 V2 规范)
+- **重构**: 模型保存改为目录结构 (`model_dir` 替代 `model_path`)
+  - `lgb_model.txt` - LightGBM 模型
+  - `normalizer.pkl` - 归一化参数
+  - `feature_columns.pkl` - 特征列顺序
 
 **v8.2.1** (2026-01-02)
 - **修复**: 章节编号错误 (第 7 节子章节 6.1/6.2/6.3 → 7.1/7.2/7.3)
