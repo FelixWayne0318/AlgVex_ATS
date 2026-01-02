@@ -14,8 +14,11 @@
 - [3. Qlib 修改详情](#3-qlib-修改详情)
 - [4. Hummingbot 修改详情](#4-hummingbot-修改详情)
 - [5. 桥接层新建代码](#5-桥接层新建代码)
-- [6. 数据准备](#6-数据准备)
-- [7. 验收标准](#7-验收标准)
+- [6. 策略层新建代码](#6-策略层新建代码)
+- [7. 模型训练](#7-模型训练)
+- [8. 数据准备](#8-数据准备)
+- [9. 启动与运行](#9-启动与运行)
+- [10. 验收标准](#10-验收标准)
 
 ---
 
@@ -54,7 +57,9 @@
 | **Qlib 修改** | config.py | +12 行 |
 | **Qlib 新增** | data/data.py | +45 行 |
 | **桥接层新增** | qlib_bridge/*.py | ~300 行 |
-| **总计** | - | **~360 行** |
+| **策略层新增** | strategy/qlib_alpha/*.py | ~350 行 |
+| **脚本新增** | scripts/*.py | ~150 行 |
+| **总计** | - | **~860 行** |
 
 ---
 
@@ -71,6 +76,13 @@
 | 5 | `hummingbot/hummingbot/data_feed/qlib_bridge/data_bridge.py` | 新建 | 数据格式转换 |
 | 6 | `hummingbot/hummingbot/data_feed/qlib_bridge/signal_bridge.py` | 新建 | 信号转订单 |
 | 7 | `hummingbot/hummingbot/data_feed/qlib_bridge/calendar.py` | 新建 | 日历生成工具 |
+| 8 | `hummingbot/hummingbot/strategy/qlib_alpha/__init__.py` | 新建 | 策略模块初始化 |
+| 9 | `hummingbot/hummingbot/strategy/qlib_alpha/qlib_alpha.py` | 新建 | Qlib Alpha 策略主类 |
+| 10 | `hummingbot/hummingbot/strategy/qlib_alpha/qlib_alpha_config.py` | 新建 | 策略配置 |
+| 11 | `hummingbot/hummingbot/strategy/qlib_alpha/start.py` | 新建 | 策略启动入口 |
+| 12 | `scripts/train_model.py` | 新建 | 模型训练脚本 |
+| 13 | `scripts/prepare_crypto_data.py` | 新建 | 数据准备脚本 |
+| 14 | `scripts/run_strategy.py` | 新建 | 策略运行脚本 |
 
 ---
 
@@ -869,9 +881,708 @@ class CryptoCalendarGenerator:
 
 ---
 
-## 6. 数据准备
+## 6. 策略层新建代码
 
-### 6.1 Qlib 数据目录结构
+### 6.1 目录结构
+
+```
+hummingbot/hummingbot/strategy/qlib_alpha/
+├── __init__.py
+├── qlib_alpha.py           # 策略主类 (继承 DirectionalStrategyBase)
+├── qlib_alpha_config.py    # 策略配置
+└── start.py                # 策略启动入口
+```
+
+---
+
+### 6.2 __init__.py
+
+**文件路径**: `hummingbot/hummingbot/strategy/qlib_alpha/__init__.py`
+
+```python
+"""
+Qlib Alpha Strategy - 基于 Qlib 机器学习模型的交易策略
+
+此策略:
+1. 使用 Hummingbot 获取实时 K 线数据
+2. 通过 DataBridge 转换为 Qlib 格式
+3. 使用预训练的 Qlib 模型生成预测信号
+4. 通过 SignalBridge 执行交易
+5. 内置三重屏障风控 (止损/止盈/时间限制)
+"""
+
+from hummingbot.strategy.qlib_alpha.qlib_alpha import QlibAlphaStrategy
+from hummingbot.strategy.qlib_alpha.qlib_alpha_config import QlibAlphaConfig
+
+__all__ = [
+    "QlibAlphaStrategy",
+    "QlibAlphaConfig",
+]
+```
+
+---
+
+### 6.3 qlib_alpha_config.py
+
+**文件路径**: `hummingbot/hummingbot/strategy/qlib_alpha/qlib_alpha_config.py`
+
+```python
+"""
+Qlib Alpha Strategy 配置
+
+使用 Pydantic 进行配置验证和管理。
+"""
+
+from decimal import Decimal
+from typing import Optional
+from pydantic import Field, field_validator
+
+from hummingbot.client.config.strategy_config_data_types import BaseTradingStrategyConfigMap
+
+
+class QlibAlphaConfig(BaseTradingStrategyConfigMap):
+    """
+    Qlib Alpha 策略配置
+    """
+
+    strategy: str = Field(default="qlib_alpha")
+
+    # 交易配置
+    exchange: str = Field(
+        default="binance",
+        description="交易所名称",
+        json_schema_extra={"prompt": "Enter exchange name (e.g., binance): ", "prompt_on_new": True},
+    )
+
+    market: str = Field(
+        default="BTC-USDT",
+        description="交易对",
+        json_schema_extra={"prompt": "Enter trading pair (e.g., BTC-USDT): ", "prompt_on_new": True},
+    )
+
+    # 订单配置
+    order_amount_usd: Decimal = Field(
+        default=Decimal("100"),
+        description="每笔订单金额 (USD)",
+        json_schema_extra={"prompt": "Enter order amount in USD: ", "prompt_on_new": True},
+    )
+
+    # 模型配置
+    model_path: str = Field(
+        default="~/.qlib/models/lgb_model.pkl",
+        description="Qlib 模型文件路径",
+        json_schema_extra={"prompt": "Enter model file path: ", "prompt_on_new": True},
+    )
+
+    qlib_data_path: str = Field(
+        default="~/.qlib/qlib_data/crypto_data",
+        description="Qlib 数据目录",
+        json_schema_extra={"prompt": "Enter Qlib data path: ", "prompt_on_new": True},
+    )
+
+    # 信号配置
+    signal_threshold: Decimal = Field(
+        default=Decimal("0.5"),
+        description="信号阈值 (0-1)，高于此值才买入",
+        json_schema_extra={"prompt": "Enter signal threshold (0-1): "},
+    )
+
+    prediction_interval: str = Field(
+        default="1h",
+        description="预测间隔 (1m, 5m, 15m, 1h, 4h, 1d)",
+        json_schema_extra={"prompt": "Enter prediction interval: "},
+    )
+
+    # 风控配置 (三重屏障)
+    stop_loss: Decimal = Field(
+        default=Decimal("0.02"),
+        description="止损比例 (0.02 = 2%)",
+        json_schema_extra={"prompt": "Enter stop loss percentage (e.g., 0.02 for 2%): "},
+    )
+
+    take_profit: Decimal = Field(
+        default=Decimal("0.03"),
+        description="止盈比例 (0.03 = 3%)",
+        json_schema_extra={"prompt": "Enter take profit percentage (e.g., 0.03 for 3%): "},
+    )
+
+    time_limit: int = Field(
+        default=3600,
+        description="持仓时间限制 (秒)",
+        json_schema_extra={"prompt": "Enter time limit in seconds: "},
+    )
+
+    # 冷却配置
+    cooldown_after_execution: int = Field(
+        default=60,
+        description="执行后冷却时间 (秒)",
+        json_schema_extra={"prompt": "Enter cooldown time in seconds: "},
+    )
+
+    max_executors: int = Field(
+        default=1,
+        description="最大同时持仓数",
+        json_schema_extra={"prompt": "Enter max concurrent positions: "},
+    )
+
+    @field_validator("stop_loss", "take_profit", mode="before")
+    @classmethod
+    def validate_percentage(cls, v):
+        v = Decimal(str(v))
+        if v <= 0 or v >= 1:
+            raise ValueError("Percentage must be between 0 and 1")
+        return v
+
+    @field_validator("signal_threshold", mode="before")
+    @classmethod
+    def validate_threshold(cls, v):
+        v = Decimal(str(v))
+        if v < 0 or v > 1:
+            raise ValueError("Threshold must be between 0 and 1")
+        return v
+```
+
+---
+
+### 6.4 qlib_alpha.py
+
+**文件路径**: `hummingbot/hummingbot/strategy/qlib_alpha/qlib_alpha.py`
+
+```python
+"""
+Qlib Alpha Strategy - 主策略类
+
+继承 DirectionalStrategyBase，使用 Qlib 模型生成交易信号。
+"""
+
+import pickle
+import logging
+from pathlib import Path
+from decimal import Decimal
+from typing import Dict, List, Optional, Set
+
+import pandas as pd
+import qlib
+from qlib.constant import REG_CRYPTO
+from qlib.contrib.data.handler import Alpha158
+
+from hummingbot.connector.connector_base import ConnectorBase
+from hummingbot.core.data_type.common import OrderType, TradeType
+from hummingbot.data_feed.candles_feed.candles_base import CandlesBase
+from hummingbot.data_feed.candles_feed.binance_spot_candles import BinanceSpotCandles
+from hummingbot.data_feed.qlib_bridge import DataBridge
+from hummingbot.strategy.directional_strategy_base import DirectionalStrategyBase
+from hummingbot.strategy.qlib_alpha.qlib_alpha_config import QlibAlphaConfig
+
+
+class QlibAlphaStrategy(DirectionalStrategyBase):
+    """
+    Qlib Alpha 策略
+
+    使用 Qlib 机器学习模型 (LGBModel) 预测价格方向，
+    结合 Hummingbot 的三重屏障风控执行交易。
+
+    工作流程:
+    1. on_tick() 每秒触发
+    2. 检查 K 线数据是否就绪
+    3. 调用 get_signal() 获取交易信号
+    4. DirectionalStrategyBase 自动处理三重屏障风控
+    """
+
+    directional_strategy_name: str = "qlib_alpha"
+
+    def __init__(
+        self,
+        connectors: Dict[str, ConnectorBase],
+        config: QlibAlphaConfig,
+    ):
+        """
+        初始化 Qlib Alpha 策略
+
+        Parameters
+        ----------
+        connectors : Dict[str, ConnectorBase]
+            交易所连接器字典
+        config : QlibAlphaConfig
+            策略配置
+        """
+        # 设置策略参数 (在调用 super().__init__ 之前)
+        self.trading_pair = config.market
+        self.exchange = config.exchange
+        self.order_amount_usd = config.order_amount_usd
+        self.stop_loss = float(config.stop_loss)
+        self.take_profit = float(config.take_profit)
+        self.time_limit = config.time_limit
+        self.cooldown_after_execution = config.cooldown_after_execution
+        self.max_executors = config.max_executors
+
+        # 初始化 K 线数据源
+        self.candles: List[CandlesBase] = [
+            BinanceSpotCandles(
+                trading_pair=self.trading_pair,
+                interval=config.prediction_interval,
+                max_records=200,  # 保留足够的历史数据用于因子计算
+            )
+        ]
+
+        # 设置 markets 属性
+        self.markets: Dict[str, Set[str]] = {config.exchange: {config.market}}
+
+        # 调用父类初始化
+        super().__init__(connectors)
+
+        # 策略配置
+        self.config = config
+        self.signal_threshold = float(config.signal_threshold)
+
+        # 初始化组件
+        self.data_bridge = DataBridge()
+        self.model = None
+        self.qlib_initialized = False
+
+        # 日志
+        self.logger = logging.getLogger(__name__)
+
+        # 加载模型
+        self._init_qlib()
+        self._load_model()
+
+    def _init_qlib(self):
+        """初始化 Qlib"""
+        try:
+            qlib_path = Path(self.config.qlib_data_path).expanduser()
+            qlib.init(
+                provider_uri=str(qlib_path),
+                region=REG_CRYPTO,
+            )
+            self.qlib_initialized = True
+            self.logger.info("Qlib initialized successfully")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Qlib: {e}")
+            self.qlib_initialized = False
+
+    def _load_model(self):
+        """加载预训练模型"""
+        try:
+            model_path = Path(self.config.model_path).expanduser()
+            if model_path.exists():
+                with open(model_path, "rb") as f:
+                    self.model = pickle.load(f)
+                self.logger.info(f"Model loaded from {model_path}")
+            else:
+                self.logger.warning(f"Model file not found: {model_path}")
+                self.model = None
+        except Exception as e:
+            self.logger.error(f"Failed to load model: {e}")
+            self.model = None
+
+    def get_signal(self) -> int:
+        """
+        获取交易信号
+
+        Returns
+        -------
+        int
+            1 = 买入, -1 = 卖出, 0 = 持有
+        """
+        # 检查前置条件
+        if not self.qlib_initialized:
+            self.logger.debug("Qlib not initialized")
+            return 0
+
+        if self.model is None:
+            self.logger.debug("Model not loaded")
+            return 0
+
+        if not self.all_candles_ready:
+            self.logger.debug("Candles not ready")
+            return 0
+
+        try:
+            # 获取 K 线数据
+            candles_df = self.candles[0].candles_df
+            if candles_df.empty or len(candles_df) < 60:
+                self.logger.debug("Not enough candle data")
+                return 0
+
+            # 转换为 Qlib 格式
+            qlib_df = self.data_bridge.candles_to_qlib(candles_df, self.trading_pair)
+
+            # 计算 Alpha158 因子
+            features = self._compute_features(qlib_df)
+            if features is None or features.empty:
+                self.logger.debug("Failed to compute features")
+                return 0
+
+            # 获取最新一行特征
+            latest_features = features.iloc[-1:].values
+
+            # 模型预测
+            prediction = self.model.predict(latest_features)[0]
+
+            # 根据阈值生成信号
+            if prediction > self.signal_threshold:
+                self.logger.info(f"BUY signal: prediction={prediction:.4f}")
+                return 1
+            elif prediction < (1 - self.signal_threshold):
+                self.logger.info(f"SELL signal: prediction={prediction:.4f}")
+                return -1
+            else:
+                return 0
+
+        except Exception as e:
+            self.logger.error(f"Error getting signal: {e}")
+            return 0
+
+    def _compute_features(self, qlib_df: pd.DataFrame) -> Optional[pd.DataFrame]:
+        """
+        计算 Alpha158 因子
+
+        使用简化版因子计算 (OHLCV 基础因子)
+        """
+        try:
+            df = qlib_df.copy()
+
+            # 重置索引以便计算
+            if isinstance(df.index, pd.MultiIndex):
+                df = df.reset_index(level="instrument", drop=True)
+
+            # 提取 OHLCV
+            close = df["$close"]
+            open_ = df["$open"]
+            high = df["$high"]
+            low = df["$low"]
+            volume = df["$volume"]
+
+            features = pd.DataFrame(index=df.index)
+
+            # 基础因子 (参考 Alpha158)
+            # KBAR 类因子
+            features["KMID"] = (close - open_) / open_
+            features["KLEN"] = (high - low) / open_
+            features["KMID2"] = (close - open_) / (high - low + 1e-12)
+            features["KUP"] = (high - max(open_, close)) / open_
+            features["KUP2"] = (high - max(open_, close)) / (high - low + 1e-12)
+            features["KLOW"] = (min(open_, close) - low) / open_
+            features["KLOW2"] = (min(open_, close) - low) / (high - low + 1e-12)
+            features["KSFT"] = (2 * close - high - low) / open_
+            features["KSFT2"] = (2 * close - high - low) / (high - low + 1e-12)
+
+            # ROC 类因子
+            for d in [5, 10, 20, 30, 60]:
+                features[f"ROC{d}"] = close / close.shift(d) - 1
+
+            # MA 类因子
+            for d in [5, 10, 20, 30, 60]:
+                ma = close.rolling(d).mean()
+                features[f"MA{d}"] = close / ma - 1
+
+            # STD 类因子
+            for d in [5, 10, 20, 30, 60]:
+                features[f"STD{d}"] = close.rolling(d).std() / close
+
+            # MAX/MIN 类因子
+            for d in [5, 10, 20, 30, 60]:
+                features[f"MAX{d}"] = close / high.rolling(d).max() - 1
+                features[f"MIN{d}"] = close / low.rolling(d).min() - 1
+
+            # QTLU/QTLD 类因子
+            for d in [5, 10, 20, 30, 60]:
+                features[f"QTLU{d}"] = close / close.rolling(d).quantile(0.8) - 1
+                features[f"QTLD{d}"] = close / close.rolling(d).quantile(0.2) - 1
+
+            # RSV 因子
+            for d in [5, 10, 20, 30, 60]:
+                hh = high.rolling(d).max()
+                ll = low.rolling(d).min()
+                features[f"RSV{d}"] = (close - ll) / (hh - ll + 1e-12)
+
+            # CORR 因子 (价量相关性)
+            for d in [5, 10, 20, 30, 60]:
+                features[f"CORR{d}"] = close.rolling(d).corr(volume)
+
+            # CORD 因子 (收益率与换手率相关性)
+            ret = close.pct_change()
+            for d in [5, 10, 20, 30, 60]:
+                features[f"CORD{d}"] = ret.rolling(d).corr(volume.pct_change())
+
+            # 删除 NaN
+            features = features.dropna()
+
+            return features
+
+        except Exception as e:
+            self.logger.error(f"Error computing features: {e}")
+            return None
+
+    def market_data_extra_info(self) -> List[str]:
+        """显示额外的市场数据信息"""
+        lines = []
+
+        if self.all_candles_ready:
+            candles_df = self.candles[0].candles_df
+            if not candles_df.empty:
+                last_close = candles_df["close"].iloc[-1]
+                last_volume = candles_df["volume"].iloc[-1]
+                lines.append(f"Last Close: {last_close}")
+                lines.append(f"Last Volume: {last_volume}")
+                lines.append(f"Candles Count: {len(candles_df)}")
+
+        lines.append(f"Model Loaded: {self.model is not None}")
+        lines.append(f"Qlib Initialized: {self.qlib_initialized}")
+        lines.append(f"Signal Threshold: {self.signal_threshold}")
+
+        return lines
+```
+
+---
+
+### 6.5 start.py
+
+**文件路径**: `hummingbot/hummingbot/strategy/qlib_alpha/start.py`
+
+```python
+"""
+Qlib Alpha Strategy 启动入口
+
+此文件由 Hummingbot 框架调用以启动策略。
+"""
+
+from typing import Dict
+
+from hummingbot.connector.connector_base import ConnectorBase
+from hummingbot.strategy.qlib_alpha.qlib_alpha import QlibAlphaStrategy
+from hummingbot.strategy.qlib_alpha.qlib_alpha_config import QlibAlphaConfig
+
+
+def start(self) -> QlibAlphaStrategy:
+    """
+    启动 Qlib Alpha 策略
+
+    此函数由 Hummingbot 的 start 命令调用。
+
+    Returns
+    -------
+    QlibAlphaStrategy
+        策略实例
+    """
+    # 从 self (HummingbotApplication) 获取配置
+    config = QlibAlphaConfig(
+        exchange=self.strategy_config_map.get("exchange"),
+        market=self.strategy_config_map.get("market"),
+        order_amount_usd=self.strategy_config_map.get("order_amount_usd"),
+        model_path=self.strategy_config_map.get("model_path"),
+        qlib_data_path=self.strategy_config_map.get("qlib_data_path"),
+        signal_threshold=self.strategy_config_map.get("signal_threshold"),
+        prediction_interval=self.strategy_config_map.get("prediction_interval"),
+        stop_loss=self.strategy_config_map.get("stop_loss"),
+        take_profit=self.strategy_config_map.get("take_profit"),
+        time_limit=self.strategy_config_map.get("time_limit"),
+        cooldown_after_execution=self.strategy_config_map.get("cooldown_after_execution"),
+        max_executors=self.strategy_config_map.get("max_executors"),
+    )
+
+    # 获取连接器
+    connectors: Dict[str, ConnectorBase] = {}
+    for connector_name in self.connectors:
+        connectors[connector_name] = self.connectors[connector_name]
+
+    # 创建策略实例
+    strategy = QlibAlphaStrategy(
+        connectors=connectors,
+        config=config,
+    )
+
+    return strategy
+```
+
+---
+
+## 7. 模型训练
+
+### 7.1 训练脚本
+
+**文件路径**: `scripts/train_model.py`
+
+```python
+"""
+模型训练脚本
+
+使用 Qlib 的 LGBModel 训练价格预测模型。
+"""
+
+import pickle
+import argparse
+from pathlib import Path
+from datetime import datetime
+
+import qlib
+from qlib.constant import REG_CRYPTO
+from qlib.contrib.model.gbdt import LGBModel
+from qlib.contrib.data.handler import Alpha158
+from qlib.data.dataset import DatasetH
+from qlib.data.dataset.handler import DataHandlerLP
+
+
+def train_model(
+    qlib_data_path: str,
+    output_path: str,
+    instruments: list,
+    train_start: str,
+    train_end: str,
+    valid_start: str,
+    valid_end: str,
+):
+    """
+    训练 LightGBM 模型
+
+    Parameters
+    ----------
+    qlib_data_path : str
+        Qlib 数据目录
+    output_path : str
+        模型输出路径
+    instruments : list
+        交易对列表
+    train_start, train_end : str
+        训练集时间范围
+    valid_start, valid_end : str
+        验证集时间范围
+    """
+    # 初始化 Qlib
+    print("Initializing Qlib...")
+    qlib.init(
+        provider_uri=qlib_data_path,
+        region=REG_CRYPTO,
+    )
+
+    # 创建数据处理器 (Alpha158 因子)
+    print("Creating data handler with Alpha158 factors...")
+    handler = Alpha158(
+        instruments=instruments,
+        start_time=train_start,
+        end_time=valid_end,
+        freq="day",
+        infer_processors=[],
+        learn_processors=[
+            {"class": "DropnaLabel"},
+            {"class": "CSRankNorm", "kwargs": {"fields_group": "label"}},
+        ],
+    )
+
+    # 创建数据集
+    print("Creating dataset...")
+    dataset = DatasetH(
+        handler=handler,
+        segments={
+            "train": (train_start, train_end),
+            "valid": (valid_start, valid_end),
+        },
+    )
+
+    # 创建模型
+    print("Creating LGBModel...")
+    model = LGBModel(
+        loss="mse",
+        early_stopping_rounds=50,
+        num_boost_round=500,
+        num_leaves=63,
+        learning_rate=0.05,
+        feature_fraction=0.8,
+        bagging_fraction=0.8,
+        bagging_freq=5,
+    )
+
+    # 训练模型
+    print("Training model...")
+    model.fit(dataset)
+
+    # 保存模型
+    output_path = Path(output_path).expanduser()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, "wb") as f:
+        pickle.dump(model, f)
+
+    print(f"Model saved to {output_path}")
+
+    # 验证模型
+    print("\nValidating model...")
+    predictions = model.predict(dataset, segment="valid")
+    print(f"Predictions shape: {predictions.shape}")
+    print(f"Predictions sample:\n{predictions.head()}")
+
+    return model
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Train Qlib model")
+    parser.add_argument(
+        "--qlib-data-path",
+        type=str,
+        default="~/.qlib/qlib_data/crypto_data",
+        help="Qlib data directory",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="~/.qlib/models/lgb_model.pkl",
+        help="Output model path",
+    )
+    parser.add_argument(
+        "--instruments",
+        type=str,
+        nargs="+",
+        default=["btcusdt", "ethusdt"],
+        help="Instruments to train on",
+    )
+    parser.add_argument(
+        "--train-start",
+        type=str,
+        default="2023-01-01",
+        help="Training start date",
+    )
+    parser.add_argument(
+        "--train-end",
+        type=str,
+        default="2024-06-30",
+        help="Training end date",
+    )
+    parser.add_argument(
+        "--valid-start",
+        type=str,
+        default="2024-07-01",
+        help="Validation start date",
+    )
+    parser.add_argument(
+        "--valid-end",
+        type=str,
+        default="2024-12-31",
+        help="Validation end date",
+    )
+
+    args = parser.parse_args()
+
+    train_model(
+        qlib_data_path=args.qlib_data_path,
+        output_path=args.output,
+        instruments=args.instruments,
+        train_start=args.train_start,
+        train_end=args.train_end,
+        valid_start=args.valid_start,
+        valid_end=args.valid_end,
+    )
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+## 8. 数据准备
+
+### 8.1 Qlib 数据目录结构
 
 ```
 ~/.qlib/qlib_data/crypto_data/
@@ -897,7 +1608,7 @@ class CryptoCalendarGenerator:
     └── all.txt           # 交易对列表
 ```
 
-### 6.2 数据准备脚本示例
+### 8.2 数据准备脚本示例
 
 **文件路径**: `scripts/prepare_crypto_data.py` (新建)
 
@@ -964,9 +1675,121 @@ if __name__ == "__main__":
 
 ---
 
-## 7. 验收标准
+## 9. 启动与运行
 
-### 7.1 验收清单
+### 9.1 完整运行流程
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      完整运行流程                            │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Step 1: 准备数据                                           │
+│  $ python scripts/prepare_crypto_data.py                   │
+│                                                             │
+│  Step 2: 训练模型                                           │
+│  $ python scripts/train_model.py                           │
+│                                                             │
+│  Step 3: 配置 API                                           │
+│  $ hummingbot                                               │
+│  >>> connect binance                                        │
+│  >>> [输入 API Key 和 Secret]                               │
+│                                                             │
+│  Step 4: 启动策略                                           │
+│  >>> create                                                 │
+│  >>> [选择 qlib_alpha 策略]                                 │
+│  >>> start                                                  │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 9.2 配置 Binance API
+
+**Step 1**: 获取 API Key
+
+1. 登录 [Binance](https://www.binance.com)
+2. 进入 API 管理页面
+3. 创建新的 API Key
+4. 启用 "Enable Spot & Margin Trading" 权限
+5. (可选) 设置 IP 白名单
+
+**Step 2**: 在 Hummingbot 中配置
+
+```bash
+# 启动 Hummingbot
+$ cd hummingbot
+$ ./start
+
+# 连接 Binance
+>>> connect binance
+Enter your Binance API key >>> [YOUR_API_KEY]
+Enter your Binance API secret >>> [YOUR_API_SECRET]
+```
+
+### 9.3 创建并启动策略
+
+```bash
+# 创建策略配置
+>>> create
+
+# 选择策略
+What is your strategy? >>> qlib_alpha
+
+# 配置参数
+Enter exchange name (e.g., binance): >>> binance
+Enter trading pair (e.g., BTC-USDT): >>> BTC-USDT
+Enter order amount in USD: >>> 100
+Enter model file path: >>> ~/.qlib/models/lgb_model.pkl
+Enter Qlib data path: >>> ~/.qlib/qlib_data/crypto_data
+Enter signal threshold (0-1): >>> 0.6
+Enter prediction interval: >>> 1h
+Enter stop loss percentage (e.g., 0.02 for 2%): >>> 0.02
+Enter take profit percentage (e.g., 0.03 for 3%): >>> 0.03
+Enter time limit in seconds: >>> 3600
+Enter cooldown time in seconds: >>> 60
+Enter max concurrent positions: >>> 1
+
+# 启动策略
+>>> start
+```
+
+### 9.4 监控与管理
+
+```bash
+# 查看策略状态
+>>> status
+
+# 查看余额
+>>> balance
+
+# 查看订单历史
+>>> history
+
+# 停止策略
+>>> stop
+
+# 退出
+>>> exit
+```
+
+### 9.5 Paper Trading (模拟交易)
+
+在正式交易前，建议使用 Binance Testnet 进行模拟交易：
+
+1. 获取 Testnet API Key: https://testnet.binance.vision/
+2. 配置连接器:
+
+```bash
+>>> connect binance_paper_trade
+Enter your Binance Testnet API key >>> [TESTNET_API_KEY]
+Enter your Binance Testnet API secret >>> [TESTNET_API_SECRET]
+```
+
+---
+
+## 10. 验收标准
+
+### 10.1 验收清单
 
 | 序号 | 验收项 | 验收方法 | 通过标准 |
 |------|--------|----------|----------|
@@ -975,10 +1798,14 @@ if __name__ == "__main__":
 | 3 | 数据转换 | DataBridge.candles_to_qlib() | MultiIndex DataFrame |
 | 4 | 信号转换 | SignalBridge.signal_to_order() | 正确订单格式 |
 | 5 | Alpha158 因子 | Alpha158(instruments=["btcusdt"]) | 158 个因子计算 |
-| 6 | 回测运行 | backtest_loop() | 完整回测报告 |
-| 7 | Paper Trading | 模拟下单 24h | 无异常 |
+| 6 | 模型训练 | scripts/train_model.py | 模型文件生成 |
+| 7 | 策略加载 | QlibAlphaStrategy 初始化 | 模型加载成功 |
+| 8 | 信号生成 | get_signal() 返回值 | 返回 -1, 0, 1 |
+| 9 | 三重屏障 | 止损/止盈触发 | 自动平仓 |
+| 10 | Paper Trading | Testnet 模拟交易 24h | 无异常 |
+| 11 | 实盘交易 | Binance 真实下单 | 订单成功执行 |
 
-### 7.2 验证代码
+### 10.2 验证代码
 
 ```python
 # 验证脚本: scripts/verify_integration.py
@@ -1070,18 +1897,43 @@ if __name__ == "__main__":
 | `hummingbot/.../qlib_bridge/data_bridge.py` | 新建 | ~150 行 |
 | `hummingbot/.../qlib_bridge/signal_bridge.py` | 新建 | ~120 行 |
 | `hummingbot/.../qlib_bridge/calendar.py` | 新建 | ~80 行 |
-| **总计** | - | **~430 行** |
+| `hummingbot/.../strategy/qlib_alpha/__init__.py` | 新建 | ~20 行 |
+| `hummingbot/.../strategy/qlib_alpha/qlib_alpha.py` | 新建 | ~250 行 |
+| `hummingbot/.../strategy/qlib_alpha/qlib_alpha_config.py` | 新建 | ~80 行 |
+| `hummingbot/.../strategy/qlib_alpha/start.py` | 新建 | ~40 行 |
+| `scripts/train_model.py` | 新建 | ~100 行 |
+| `scripts/prepare_crypto_data.py` | 新建 | ~50 行 |
+| **总计** | - | **~970 行** |
 
 ### B. 使用示例
 
 ```python
-# 完整使用示例
+# 完整使用示例: 从数据准备到实盘交易
 
+# ============ Step 1: 数据准备 ============
+# $ python scripts/prepare_crypto_data.py
+
+# ============ Step 2: 模型训练 ============
+# $ python scripts/train_model.py \
+#     --instruments btcusdt ethusdt \
+#     --train-start 2023-01-01 \
+#     --train-end 2024-06-30 \
+#     --valid-start 2024-07-01 \
+#     --valid-end 2024-12-31
+
+# ============ Step 3: 启动 Hummingbot ============
+# $ cd hummingbot && ./start
+# >>> connect binance
+# >>> create
+# >>> [选择 qlib_alpha]
+# >>> start
+
+# ============ Python API 示例 ============
 import qlib
 from qlib.constant import REG_CRYPTO
 from qlib.contrib.data.handler import Alpha158
-from qlib.backtest import backtest_loop
 from hummingbot.data_feed.qlib_bridge import DataBridge, SignalBridge
+from hummingbot.strategy.qlib_alpha import QlibAlphaStrategy, QlibAlphaConfig
 
 # 1. 初始化 Qlib
 qlib.init(
@@ -1089,32 +1941,53 @@ qlib.init(
     region=REG_CRYPTO,
 )
 
-# 2. 加载 Alpha158 因子
-handler = Alpha158(
-    instruments=["btcusdt", "ethusdt"],
-    start_time="2024-01-01",
-    end_time="2024-12-31",
-    freq="day",
+# 2. 加载预训练模型
+import pickle
+with open("~/.qlib/models/lgb_model.pkl", "rb") as f:
+    model = pickle.load(f)
+
+# 3. 创建策略配置
+config = QlibAlphaConfig(
+    exchange="binance",
+    market="BTC-USDT",
+    order_amount_usd=100,
+    model_path="~/.qlib/models/lgb_model.pkl",
+    stop_loss=0.02,
+    take_profit=0.03,
+    time_limit=3600,
 )
 
-# 3. 训练模型并回测
-# ... (使用 Qlib 标准流程)
+# 4. 策略将自动:
+#    - 获取实时 K 线数据 (BinanceSpotCandles)
+#    - 计算 Alpha158 因子
+#    - 调用模型生成预测
+#    - 根据阈值生成交易信号
+#    - 通过三重屏障管理持仓
+#    - 自动止损止盈
+```
 
-# 4. 实盘交易时使用 SignalBridge
-from hummingbot.connector.exchange.binance import BinanceExchange
+### C. 常见问题
 
-connector = BinanceExchange(
-    binance_api_key="...",
-    binance_api_secret="...",
-)
-signal_bridge = SignalBridge(connector)
+| 问题 | 解决方案 |
+|------|----------|
+| Qlib 初始化失败 | 检查 `qlib_data_path` 是否正确，确保数据已准备 |
+| 模型加载失败 | 确保已运行 `train_model.py` 生成模型文件 |
+| K 线数据不足 | 等待 Hummingbot 收集足够的历史数据 (约 60 根 K 线) |
+| 信号一直为 0 | 调整 `signal_threshold` 参数，或检查模型预测范围 |
+| 订单执行失败 | 检查 API 权限、余额、交易对是否正确 |
 
-# 执行信号
-order = signal_bridge.signal_to_order(signal, balance, position)
-await signal_bridge.execute_order(order)
+### D. 依赖版本
+
+```
+qlib >= 0.9.7
+hummingbot >= 2.11.0
+lightgbm >= 4.0.0
+pandas >= 2.0.0
+numpy >= 1.24.0
+pydantic >= 2.0.0
 ```
 
 ---
 
-> **版本**: v4.0.0 (2026-01-02)
-> **状态**: 可直接实施的详细方案
+> **版本**: v5.0.0 (2026-01-02)
+> **状态**: 可直接运行的完整方案 (含策略层)
