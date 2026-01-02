@@ -1,6 +1,6 @@
 # AlgVex 核心方案 (P0 - MVP)
 
-> **版本**: v8.0.0 (2026-01-02)
+> **版本**: v8.0.1 (2026-01-02)
 > **状态**: 可直接运行的完整方案
 
 > **Qlib + Hummingbot 融合的加密货币现货量化交易平台**
@@ -324,7 +324,7 @@ def convert_to_qlib_format(
 
     Qlib 格式:
     - MultiIndex: (datetime, instrument)
-    - Columns: $open, $high, $low, $close, $volume, $vwap
+    - Columns: $open, $high, $low, $close, $volume, $vwap, $factor
     """
     if df.empty:
         return pd.DataFrame()
@@ -351,11 +351,15 @@ def convert_to_qlib_format(
     df["$close"] = df["close"]
     df["$volume"] = df["volume"]
 
+    # factor 字段: 复权因子 (加密货币无复权，设为 1.0)
+    # Qlib 官方要求: open, close, high, low, volume and factor at least
+    df["$factor"] = 1.0
+
     # 设置 MultiIndex
     df = df.set_index(["datetime", "instrument"])
 
     # 只保留 Qlib 需要的列
-    return df[["$open", "$high", "$low", "$close", "$volume", "$vwap"]]
+    return df[["$open", "$high", "$low", "$close", "$volume", "$vwap", "$factor"]]
 
 
 def save_to_qlib_format(
@@ -395,7 +399,8 @@ def save_to_qlib_format(
         calendar_filename = f"{freq_lower}.txt"
 
     # 保存每个交易对的特征数据
-    qlib_columns = ["$open", "$high", "$low", "$close", "$volume", "$vwap"]
+    # Qlib 官方要求: open, close, high, low, volume and factor at least
+    qlib_columns = ["$open", "$high", "$low", "$close", "$volume", "$vwap", "$factor"]
     for inst in instruments:
         inst_df = merged_df.xs(inst, level="instrument")
         inst_df = inst_df.reindex(full_calendar)  # 对齐日历
@@ -514,7 +519,8 @@ if __name__ == "__main__":
 │   │   ├── low.bin
 │   │   ├── close.bin
 │   │   ├── volume.bin
-│   │   └── vwap.bin
+│   │   ├── vwap.bin
+│   │   └── factor.bin      # 复权因子 (加密货币=1.0)
 │   └── ethusdt/
 │       └── ...
 └── instruments/
@@ -1379,6 +1385,11 @@ aiohttp >= 3.8.0
 | Controller 未找到 | 检查 controllers/ 目录和导入路径 |
 
 ### C. 变更日志
+
+**v8.0.1** (2026-01-02)
+- 添加 `$factor` 字段支持 (Qlib 官方要求的必需字段)
+- 加密货币无复权，factor 固定为 1.0
+- 更新数据目录结构说明
 
 **v8.0.0** (2026-01-02)
 - **重大升级**: 采用 Hummingbot Strategy V2 架构
