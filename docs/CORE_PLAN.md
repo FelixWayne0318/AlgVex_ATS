@@ -1,6 +1,6 @@
 # AlgVex 核心方案 (P0 - MVP)
 
-> **版本**: v9.0.0 (2026-01-02)
+> **版本**: v9.0.1 (2026-01-02)
 > **状态**: 可直接运行的完整方案
 
 > **Qlib + Hummingbot 融合的加密货币现货量化交易平台**
@@ -265,7 +265,35 @@ print(f"region: {C['region']}")                # crypto
 
 ## 4. 数据准备
 
-### 4.1 为何不使用 Qlib 官方加密货币收集器
+### 4.1 频率命名规范 (v9.0.1)
+
+> **重要**: Qlib 和 Binance 对频率的命名不同，必须做映射。
+
+| 系统 | 命名 | 说明 |
+|------|------|------|
+| **Binance API** | `1h`, `4h`, `1d` | API 参数使用此格式 |
+| **Qlib** | `60min`, `240min`, `day` | 日历文件、freq 参数使用此格式 |
+| **Hummingbot** | `1h`, `4h`, `1d` | candles 配置使用此格式 |
+
+**频率映射表:**
+
+```python
+# 在数据准备脚本中使用
+FREQ_MAPPING = {
+    "1m": "1min",
+    "5m": "5min",
+    "15m": "15min",
+    "1h": "60min",    # 重要: Qlib 统一用 60min
+    "4h": "240min",
+    "1d": "day",
+}
+```
+
+> ⚠️ **风险提示**: Qlib 回测链路对 freq 参数处理有已知问题，
+> 使用非标准命名 (如整数 `60` 或 `1h`) 可能触发"找 day 数据"等错误。
+> 建议统一使用 `"60min"` 格式。
+
+### 4.2 为何不使用 Qlib 官方加密货币收集器
 
 > **说明**: Qlib 官方提供了加密货币数据收集器 (`qlib/scripts/data_collector/crypto/`)，
 > 但本方案选择自定义实现，原因如下：
@@ -468,14 +496,20 @@ def save_to_qlib_format(
     # 获取完整日历
     full_calendar = merged_df.index.get_level_values("datetime").unique().sort_values()
 
+    # 频率映射 (Binance → Qlib)
+    freq_mapping = {
+        "1m": "1min", "5m": "5min", "15m": "15min",
+        "1h": "60min", "4h": "240min", "1d": "day",
+    }
+    qlib_freq = freq_mapping.get(freq.lower(), freq.lower())
+
     # 时间格式
-    freq_lower = freq.lower()
-    if freq_lower in ["1d", "day"]:
+    if qlib_freq in ["1d", "day"]:
         time_format = "%Y-%m-%d"
         calendar_filename = "day.txt"
     else:
         time_format = "%Y-%m-%d %H:%M:%S"
-        calendar_filename = f"{freq_lower}.txt"
+        calendar_filename = f"{qlib_freq}.txt"  # 使用 Qlib 格式: 60min.txt
 
     # 保存每个交易对的特征数据
     # Qlib 官方要求: open, close, high, low, volume and factor at least
@@ -590,7 +624,7 @@ if __name__ == "__main__":
 ```
 ~/.qlib/qlib_data/crypto_data/
 ├── calendars/
-│   └── 1h.txt              # 小时级日历
+│   └── 60min.txt           # 小时级日历 (Qlib 命名规范)
 ├── features/
 │   ├── btcusdt/
 │   │   ├── open.bin
@@ -605,6 +639,35 @@ if __name__ == "__main__":
 └── instruments/
     └── all.txt             # 交易对列表
 ```
+
+### 4.4 .bin 文件格式风险说明
+
+> ⚠️ **重要提醒**: 本方案自定义了 .bin 文件写入逻辑，存在一定风险。
+
+**当前实现:**
+```python
+# 我们的写入方式
+start_index = np.array([0], dtype=np.float32)
+np.hstack([start_index, data]).tofile(file_path)
+```
+
+**Qlib 官方 dump_bin.py 实现:**
+```python
+# Qlib 的写入方式 (更复杂)
+np.hstack([date_index, _df[field]]).astype("<f").tofile(...)
+```
+
+**风险评估:**
+
+| 风险点 | 说明 | 缓解措施 |
+|--------|------|----------|
+| **日历对齐** | Qlib 使用 date_index 对齐，我们假设连续 | 加密货币 24/7 交易，连续性假设成立 |
+| **升级兼容性** | Qlib 升级可能改变读取逻辑 | 锁定 Qlib 版本，升级前测试 |
+| **缺口处理** | 日内数据缺口可能导致对齐问题 | 数据准备时检查并填充缺口 |
+
+**建议:**
+- 如需更稳定方案，考虑复用 Qlib 的 `dump_bin.py` 转换逻辑
+- 当前实现已验证可用，但请锁定 Qlib 版本 (推荐 >= 0.9.7)
 
 ---
 
@@ -885,7 +948,7 @@ def train_model(
     train_end: str,
     valid_start: str,
     valid_end: str,
-    freq: str = "1h",
+    freq: str = "60min",  # Qlib 统一使用 60min
 ):
     """训练 LightGBM 模型"""
 
@@ -1007,7 +1070,7 @@ def main():
     parser.add_argument("--train-end", type=str, default="2024-06-30")
     parser.add_argument("--valid-start", type=str, default="2024-07-01")
     parser.add_argument("--valid-end", type=str, default="2024-12-31")
-    parser.add_argument("--freq", type=str, default="1h")
+    parser.add_argument("--freq", type=str, default="60min", help="Qlib freq (use 60min, not 1h)")
 
     args = parser.parse_args()
 
@@ -1113,7 +1176,7 @@ def run_backtest(
     instruments: list,
     test_start: str,
     test_end: str,
-    freq: str = "1h",
+    freq: str = "60min",  # Qlib 统一使用 60min
     topk: int = 1,
     n_drop: int = 0,
     benchmark: str = "btcusdt",
@@ -1379,7 +1442,7 @@ def main():
     parser.add_argument("--instruments", type=str, nargs="+", default=["btcusdt", "ethusdt"])
     parser.add_argument("--test-start", type=str, default="2024-07-01")
     parser.add_argument("--test-end", type=str, default="2024-12-31")
-    parser.add_argument("--freq", type=str, default="1h")
+    parser.add_argument("--freq", type=str, default="60min", help="Qlib freq (use 60min, not 1h)")
     parser.add_argument("--topk", type=int, default=1)
     parser.add_argument("--benchmark", type=str, default="btcusdt")
 
@@ -1970,7 +2033,7 @@ controllers_config:
 │  Step 2: 训练模型                                           │
 │  $ python scripts/train_model.py \                         │
 │      --instruments btcusdt ethusdt \                       │
-│      --freq 1h                                             │
+│      --freq 60min    # Qlib 统一使用 60min                 │
 │                                                             │
 │  Step 3: Qlib 回测 (模型验证) ← 新增                        │
 │  $ python scripts/backtest_model.py \                      │
@@ -2012,7 +2075,7 @@ python scripts/train_model.py \
     --train-end 2024-06-30 \
     --valid-start 2024-07-01 \
     --valid-end 2024-12-31 \
-    --freq 1h
+    --freq 60min    # Qlib 统一使用 60min
 
 # Qlib 回测 (模型验证)
 python scripts/backtest_model.py \
@@ -2021,7 +2084,7 @@ python scripts/backtest_model.py \
     --instruments btcusdt ethusdt \
     --test-start 2024-07-01 \
     --test-end 2024-12-31 \
-    --freq 1h
+    --freq 60min    # Qlib 统一使用 60min
 
 # 启动 V2 策略
 cd hummingbot
@@ -2336,6 +2399,17 @@ aiohttp >= 3.8.0
 | Controller 未找到 | 检查 controllers/ 目录和导入路径 |
 
 ### C. 变更日志
+
+**v9.0.1** (2026-01-02) - 专家反馈修复
+- **优化**: 统一 Qlib freq 为 `"60min"` (不使用 `"1h"` 或整数 `60`)
+  - 新增频率映射表 (Binance `1h` → Qlib `60min`)
+  - 日历文件命名改为 `60min.txt`
+  - 避免 Qlib 回测链路的 freq 处理问题
+- **文档**: 新增 .bin 文件格式风险说明 (4.4 节)
+  - 说明与官方 dump_bin.py 实现的差异
+  - 提供风险评估和缓解措施
+- **文档**: 新增频率命名规范 (4.1 节)
+  - Binance API / Qlib / Hummingbot 频率映射
 
 **v9.0.0** (2026-01-02) - 重大修复版本
 - **P0 修复**: 统一训练/实盘特征计算 (致命缺陷修复)
