@@ -1,6 +1,6 @@
 # AlgVex 核心方案 (P0 - MVP)
 
-> **版本**: v6.1.1 (2026-01-02)
+> **版本**: v6.2.0 (2026-01-02)
 > **状态**: 可直接运行的完整方案
 
 > **Qlib + Hummingbot 融合的加密货币现货量化交易平台**
@@ -605,6 +605,7 @@ Qlib Alpha 策略
     >>> start --script qlib_alpha_strategy.py --conf conf/scripts/qlib_alpha.yml
 """
 
+import os
 import pickle
 import logging
 from pathlib import Path
@@ -619,6 +620,7 @@ import qlib
 from qlib.config import C
 
 from hummingbot.client.config.config_data_types import BaseClientModel
+from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
 from hummingbot.core.data_type.common import OrderType, TradeType, PositionAction
 from hummingbot.data_feed.candles_feed.candles_factory import CandlesFactory
@@ -632,7 +634,8 @@ from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 class QlibAlphaConfig(BaseClientModel):
     """策略配置 (Pydantic 模型)"""
 
-    script: str = "qlib_alpha_strategy.py"
+    # 必须: 脚本文件名 (Hummingbot 要求)
+    script_file_name: str = os.path.basename(__file__)
 
     # 交易配置
     exchange: str = Field(default="binance", description="交易所")
@@ -673,15 +676,18 @@ class QlibAlphaStrategy(ScriptStrategyBase):
     5. 执行交易 + 三重屏障风控
     """
 
-    # Hummingbot 要求: 声明市场
-    markets = {}  # 动态设置
+    @classmethod
+    def init_markets(cls, config: QlibAlphaConfig):
+        """
+        初始化市场配置 (Hummingbot 在创建 connectors 前调用)
 
-    def __init__(self, connectors: Dict, config: QlibAlphaConfig):
-        # 设置市场
-        self.markets = {config.exchange: {config.trading_pair}}
+        重要: 必须使用 classmethod，不能在 __init__ 中设置
+        参考: hummingbot/scripts/simple_pmm.py
+        """
+        cls.markets = {config.exchange: {config.trading_pair}}
 
-        super().__init__(connectors, config)
-
+    def __init__(self, connectors: Dict[str, ConnectorBase], config: QlibAlphaConfig):
+        super().__init__(connectors)
         self.config = config
         self.logger = logging.getLogger(__name__)
 
@@ -1224,6 +1230,11 @@ aiohttp >= 3.8.0
 | 订单执行失败 | 检查 API 权限、余额 |
 
 ### C. 变更日志
+
+**v6.2.0** (2026-01-02)
+- 修复 markets 定义：使用 `init_markets` classmethod (参考 simple_pmm.py)
+- 修复 config 类：`script` → `script_file_name` (Hummingbot 要求)
+- 添加 `ConnectorBase` 导入和正确的类型注解
 
 **v6.1.1** (2026-01-02)
 - 修复属性名：`is_ready` → `ready` (与 CandlesBase 源码一致)
