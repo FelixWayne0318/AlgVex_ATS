@@ -37,14 +37,17 @@
 │                                                             │
 │  2. Qlib 修改范围                                            │
 │     - constant.py: 添加 REG_CRYPTO 区域常量                  │
-│     - config.py: 添加加密货币区域配置                         │
-│     - data/data.py: 添加 CryptoCalendarProvider             │
+│     - config.py: 添加加密货币区域配置 + get_crypto_config()  │
+│     - data/data.py: 添加 CryptoCalendarProvider (可选)      │
 │                                                             │
 │  3. Hummingbot 修改范围                                      │
-│     - 无需修改，100% 原生使用                                 │
+│     - 现有代码无需修改，100% 原生复用                         │
+│     - 新增模块: data_feed/qlib_bridge/ (桥接层)             │
+│     - 新增模块: strategy/qlib_alpha/ (策略层)               │
 │                                                             │
-│  4. 新建桥接层                                               │
-│     - hummingbot/hummingbot/data_feed/qlib_bridge/          │
+│  4. 升级兼容性                                               │
+│     - Hummingbot 升级时保留新增目录即可                       │
+│     - Qlib 升级时重新应用 3 处修改                           │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -179,8 +182,59 @@ _default_region_config = {
         "deal_price": "close",
         "trade_calendar": "24/7",    # 24/7 交易
         "timezone": "UTC",           # UTC 时区
+        # 注意：加密货币使用本地日历文件，不需要特殊 CalendarProvider
+        # 日历文件由 prepare_crypto_data.py 生成
     },
 }
+```
+
+---
+
+**修改位置 3**: 第 280 行附近，MODE_CONF["client"] 中添加加密货币默认配置
+
+**修改前**:
+```python
+"client": {
+    # ...existing config...
+    "region": REG_CN,
+    # ...
+},
+```
+
+**修改后**:
+```python
+# 在文件末尾添加一个辅助函数，用于加密货币初始化
+def get_crypto_config(provider_uri: str = "~/.qlib/qlib_data/crypto_data") -> dict:
+    """
+    获取加密货币专用配置
+
+    用法:
+        import qlib
+        from qlib.config import get_crypto_config
+        qlib.init(**get_crypto_config("/path/to/crypto_data"))
+
+    Parameters
+    ----------
+    provider_uri : str
+        加密货币数据目录
+
+    Returns
+    -------
+    dict
+        Qlib 初始化配置
+    """
+    from pathlib import Path
+
+    return {
+        "provider_uri": str(Path(provider_uri).expanduser()),
+        "region": REG_CRYPTO,
+        # 加密货币使用本地日历文件 (由 prepare_crypto_data.py 生成)
+        "calendar_provider": "LocalCalendarProvider",
+        "instrument_provider": "LocalInstrumentProvider",
+        "feature_provider": "LocalFeatureProvider",
+        "expression_provider": "LocalExpressionProvider",
+        "dataset_provider": "LocalDatasetProvider",
+    }
 ```
 
 ---
@@ -253,17 +307,26 @@ class CryptoCalendarProvider(CalendarProvider):
 
 ## 4. Hummingbot 修改详情
 
-### 4.1 无需修改
+### 4.1 修改策略
 
-Hummingbot 100% 原生使用，无需修改任何现有代码。
+**Hummingbot 现有代码无需修改**，但需要在 `hummingbot/` 目录下**新增**以下模块：
 
-以下组件直接使用：
+- `hummingbot/data_feed/qlib_bridge/` - 数据桥接层（新增）
+- `hummingbot/strategy/qlib_alpha/` - Qlib Alpha 策略（新增）
+
+这种方式的优点：
+1. 不破坏 Hummingbot 原有功能
+2. 可随时升级 Hummingbot 版本（合并时注意保留新增目录）
+3. 新增代码与原有代码解耦
+
+以下 Hummingbot 原生组件直接复用（无需修改）：
 
 | 组件 | 文件路径 | 用途 |
 |------|----------|------|
 | BinanceSpotCandles | `data_feed/candles_feed/binance_spot_candles/` | K线数据获取 |
 | BinanceExchange | `connector/exchange/binance/` | 订单执行 |
 | CandlesBase | `data_feed/candles_feed/candles_base.py` | K线基类 |
+| DirectionalStrategyBase | `strategy/directional_strategy_base.py` | 策略基类 |
 
 ---
 
@@ -449,7 +512,8 @@ class DataBridge:
     def to_qlib_provider_format(
         self,
         df: pd.DataFrame,
-        output_dir: str
+        output_dir: str,
+        freq: str = "1h",
     ) -> None:
         """
         将数据保存为 Qlib Provider 可读取的格式
@@ -460,6 +524,8 @@ class DataBridge:
             Qlib 格式的 DataFrame
         output_dir : str
             输出目录路径
+        freq : str
+            数据频率，如 "1min", "5min", "1h", "1d"，影响日历文件名和时间格式
         """
         import os
         from pathlib import Path
@@ -476,9 +542,16 @@ class DataBridge:
         # 获取所有交易对
         instruments = df.index.get_level_values("instrument").unique()
 
+        # 获取完整日历 (所有时间戳的并集)
+        full_calendar = df.index.get_level_values("datetime").unique().sort_values()
+
         # 保存每个交易对的特征数据
+        # 注意：必须对齐到统一日历，缺失值用 NaN 填充
         for inst in instruments:
             inst_df = df.xs(inst, level="instrument")
+            # 对齐到完整日历
+            inst_df = inst_df.reindex(full_calendar)
+
             inst_dir = features_dir / inst
             inst_dir.mkdir(exist_ok=True)
 
@@ -486,22 +559,32 @@ class DataBridge:
                 col_name = col.replace("$", "")
                 file_path = inst_dir / f"{col_name}.bin"
                 # Qlib 使用 float32 二进制格式
+                # NaN 值会被保留，Qlib 读取时会处理
                 inst_df[col].values.astype(np.float32).tofile(file_path)
 
         # 保存日历
-        calendar = df.index.get_level_values("datetime").unique()
-        calendar_file = calendars_dir / "day.txt"
+        # 根据频率决定文件名和时间格式
+        freq_lower = freq.lower()
+        if freq_lower in ["1d", "day"]:
+            calendar_filename = "day.txt"
+            time_format = "%Y-%m-%d"
+        else:
+            # 分钟/小时级别
+            calendar_filename = f"{freq_lower}.txt"
+            time_format = "%Y-%m-%d %H:%M:%S"
+
+        calendar_file = calendars_dir / calendar_filename
         with open(calendar_file, "w") as f:
-            for dt in calendar:
-                f.write(dt.strftime("%Y-%m-%d") + "\n")
+            for dt in full_calendar:
+                f.write(dt.strftime(time_format) + "\n")
 
         # 保存交易对列表
         instruments_file = instruments_dir / "all.txt"
         with open(instruments_file, "w") as f:
             for inst in instruments:
-                dates = df.xs(inst, level="instrument").index
-                start = dates.min().strftime("%Y-%m-%d")
-                end = dates.max().strftime("%Y-%m-%d")
+                # 使用完整日历的范围
+                start = full_calendar.min().strftime(time_format)
+                end = full_calendar.max().strftime(time_format)
                 f.write(f"{inst}\t{start}\t{end}\n")
 ```
 
@@ -573,6 +656,7 @@ class SignalBridge:
         signal: Dict[str, Any],
         available_balance: Decimal,
         current_position: Decimal = Decimal("0"),
+        current_price: Decimal = Decimal("0"),
     ) -> Optional[Dict[str, Any]]:
         """
         将 Qlib 信号转换为 Hummingbot 订单
@@ -586,9 +670,11 @@ class SignalBridge:
             - weight: float, 目标权重
             - score: float, 预测分数
         available_balance : Decimal
-            可用余额
+            可用报价币余额 (如 USDT)
         current_position : Decimal
-            当前持仓
+            当前基础币持仓 (如 BTC 数量)
+        current_price : Decimal
+            当前价格，用于单位转换
 
         Returns
         -------
@@ -601,32 +687,43 @@ class SignalBridge:
         if direction == 0:
             return None
 
+        # 价格校验
+        if current_price <= 0:
+            self.logger.error("Invalid current_price for unit conversion")
+            return None
+
         instrument = signal.get("instrument", "")
         weight = Decimal(str(signal.get("weight", 0)))
 
-        # 计算目标金额
-        target_amount = available_balance * weight
+        # 计算目标金额 (报价币，如 USDT)
+        target_quote_amount = available_balance * weight
 
-        # 计算需要交易的金额
+        # 将当前持仓转换为报价币价值
+        # current_position 是基础币数量 (如 BTC)
+        # current_position_quote 是等值报价币 (如 USDT)
+        current_position_quote = current_position * current_price
+
+        # 计算需要交易的报价币金额
         if direction > 0:  # 买入
-            trade_amount = target_amount - current_position
+            trade_quote_amount = target_quote_amount - current_position_quote
             trade_type = TradeType.BUY
         else:  # 卖出
-            trade_amount = current_position - target_amount
+            trade_quote_amount = current_position_quote - target_quote_amount
             trade_type = TradeType.SELL
 
-        # 检查最小下单金额
-        if abs(trade_amount) < self.min_order_amount:
-            self.logger.debug(f"Trade amount {trade_amount} below minimum {self.min_order_amount}")
-            return None
+        # 转换为基础币数量 (Hummingbot 下单使用基础币数量)
+        trade_base_amount = abs(trade_quote_amount) / current_price
 
-        trade_amount = abs(trade_amount)
+        # 检查最小下单数量
+        if trade_base_amount < self.min_order_amount:
+            self.logger.debug(f"Trade amount {trade_base_amount} below minimum {self.min_order_amount}")
+            return None
 
         return {
             "trading_pair": self._format_trading_pair(instrument),
             "order_type": self.default_order_type,
             "trade_type": trade_type,
-            "amount": trade_amount,
+            "amount": trade_base_amount,
             "price": Decimal("0"),  # 市价单
         }
 
@@ -699,6 +796,7 @@ class SignalBridge:
         signals: List[Dict[str, Any]],
         available_balance: Decimal,
         positions: Dict[str, Decimal],
+        prices: Dict[str, Decimal],
     ) -> List[Dict[str, Any]]:
         """
         批量转换信号为订单
@@ -708,9 +806,11 @@ class SignalBridge:
         signals : List[Dict]
             Qlib 信号列表
         available_balance : Decimal
-            可用余额
+            可用报价币余额 (如 USDT)
         positions : Dict[str, Decimal]
-            当前持仓 {instrument: amount}
+            当前持仓 {instrument: base_amount}，基础币数量
+        prices : Dict[str, Decimal]
+            当前价格 {instrument: price}，用于单位转换
 
         Returns
         -------
@@ -722,11 +822,13 @@ class SignalBridge:
         for signal in signals:
             instrument = signal.get("instrument", "")
             current_position = positions.get(instrument, Decimal("0"))
+            current_price = prices.get(instrument, Decimal("0"))
 
             order = self.signal_to_order(
                 signal=signal,
                 available_balance=available_balance,
                 current_position=current_position,
+                current_price=current_price,
             )
 
             if order is not None:
@@ -981,10 +1083,12 @@ class QlibAlphaConfig(BaseTradingStrategyConfigMap):
     )
 
     # 信号配置
+    # 注意：阈值是收益率阈值，不是概率阈值
+    # 模型预测的是未来收益率，典型范围 [-0.05, +0.05]
     signal_threshold: Decimal = Field(
-        default=Decimal("0.5"),
-        description="信号阈值 (0-1)，高于此值才买入",
-        json_schema_extra={"prompt": "Enter signal threshold (0-1): "},
+        default=Decimal("0.005"),
+        description="信号阈值 (收益率)，预测值 > 阈值则买入，< -阈值则卖出。0.005 表示 0.5%",
+        json_schema_extra={"prompt": "Enter signal threshold (e.g., 0.005 for 0.5% return): "},
     )
 
     prediction_interval: str = Field(
@@ -1218,14 +1322,19 @@ class QlibAlphaStrategy(DirectionalStrategyBase):
             latest_features = features.iloc[-1:].values
 
             # 模型预测
-            prediction = self.model.predict(latest_features)[0]
+            # 注意：Qlib LGBModel.predict() 期望 DatasetH 对象，但实盘需要直接调用底层 lightgbm
+            # self.model 是 Qlib LGBModel，self.model.model 是底层 lightgbm.Booster
+            prediction = self.model.model.predict(latest_features)[0]
 
             # 根据阈值生成信号
+            # 注意：Alpha158 标签是收益率 (Ref($close,-2)/Ref($close,-1)-1)
+            # 预测值范围通常在 [-0.05, +0.05]，不是 [0,1] 概率
+            # signal_threshold 应设为收益率阈值（如 0.005 表示 0.5% 收益）
             if prediction > self.signal_threshold:
-                self.logger.info(f"BUY signal: prediction={prediction:.4f}")
+                self.logger.info(f"BUY signal: prediction={prediction:.6f} > threshold={self.signal_threshold}")
                 return 1
-            elif prediction < (1 - self.signal_threshold):
-                self.logger.info(f"SELL signal: prediction={prediction:.4f}")
+            elif prediction < -self.signal_threshold:
+                self.logger.info(f"SELL signal: prediction={prediction:.6f} < -{self.signal_threshold}")
                 return -1
             else:
                 return 0
@@ -1258,13 +1367,15 @@ class QlibAlphaStrategy(DirectionalStrategyBase):
 
             # 基础因子 (参考 Alpha158)
             # KBAR 类因子
+            # 注意：必须使用 np.maximum/np.minimum 进行逐元素比较
+            # Python 内置 max/min 对 Series 会触发 "truth value ambiguous" 错误
             features["KMID"] = (close - open_) / open_
             features["KLEN"] = (high - low) / open_
             features["KMID2"] = (close - open_) / (high - low + 1e-12)
-            features["KUP"] = (high - max(open_, close)) / open_
-            features["KUP2"] = (high - max(open_, close)) / (high - low + 1e-12)
-            features["KLOW"] = (min(open_, close) - low) / open_
-            features["KLOW2"] = (min(open_, close) - low) / (high - low + 1e-12)
+            features["KUP"] = (high - np.maximum(open_, close)) / open_
+            features["KUP2"] = (high - np.maximum(open_, close)) / (high - low + 1e-12)
+            features["KLOW"] = (np.minimum(open_, close) - low) / open_
+            features["KLOW2"] = (np.minimum(open_, close) - low) / (high - low + 1e-12)
             features["KSFT"] = (2 * close - high - low) / open_
             features["KSFT2"] = (2 * close - high - low) / (high - low + 1e-12)
 
@@ -1348,11 +1459,43 @@ Qlib Alpha Strategy 启动入口
 此文件由 Hummingbot 框架调用以启动策略。
 """
 
-from typing import Dict
+from typing import Dict, Any
 
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.strategy.qlib_alpha.qlib_alpha import QlibAlphaStrategy
 from hummingbot.strategy.qlib_alpha.qlib_alpha_config import QlibAlphaConfig
+
+
+def _get_config_value(config_map: Dict, key: str, default: Any = None) -> Any:
+    """
+    安全地从 config_map 获取值
+
+    Hummingbot 的 config_map 可能返回 ConfigVar 对象而非原始值，
+    需要通过 .value 属性获取实际值。
+
+    Parameters
+    ----------
+    config_map : Dict
+        配置字典
+    key : str
+        配置键名
+    default : Any
+        默认值
+
+    Returns
+    -------
+    Any
+        配置值
+    """
+    value = config_map.get(key, default)
+    if value is None:
+        return default
+
+    # 如果是 ConfigVar 或类似对象，尝试获取 .value 属性
+    if hasattr(value, 'value'):
+        return value.value
+
+    return value
 
 
 def start(self) -> QlibAlphaStrategy:
@@ -1367,19 +1510,20 @@ def start(self) -> QlibAlphaStrategy:
         策略实例
     """
     # 从 self (HummingbotApplication) 获取配置
+    # 使用 _get_config_value 安全地提取值，处理 ConfigVar 类型
     config = QlibAlphaConfig(
-        exchange=self.strategy_config_map.get("exchange"),
-        market=self.strategy_config_map.get("market"),
-        order_amount_usd=self.strategy_config_map.get("order_amount_usd"),
-        model_path=self.strategy_config_map.get("model_path"),
-        qlib_data_path=self.strategy_config_map.get("qlib_data_path"),
-        signal_threshold=self.strategy_config_map.get("signal_threshold"),
-        prediction_interval=self.strategy_config_map.get("prediction_interval"),
-        stop_loss=self.strategy_config_map.get("stop_loss"),
-        take_profit=self.strategy_config_map.get("take_profit"),
-        time_limit=self.strategy_config_map.get("time_limit"),
-        cooldown_after_execution=self.strategy_config_map.get("cooldown_after_execution"),
-        max_executors=self.strategy_config_map.get("max_executors"),
+        exchange=_get_config_value(self.strategy_config_map, "exchange", "binance"),
+        market=_get_config_value(self.strategy_config_map, "market", "BTC-USDT"),
+        order_amount_usd=_get_config_value(self.strategy_config_map, "order_amount_usd", 100),
+        model_path=_get_config_value(self.strategy_config_map, "model_path", "~/.qlib/models/lgb_model.pkl"),
+        qlib_data_path=_get_config_value(self.strategy_config_map, "qlib_data_path", "~/.qlib/qlib_data/crypto_data"),
+        signal_threshold=_get_config_value(self.strategy_config_map, "signal_threshold", 0.005),
+        prediction_interval=_get_config_value(self.strategy_config_map, "prediction_interval", "1h"),
+        stop_loss=_get_config_value(self.strategy_config_map, "stop_loss", 0.02),
+        take_profit=_get_config_value(self.strategy_config_map, "take_profit", 0.03),
+        time_limit=_get_config_value(self.strategy_config_map, "time_limit", 3600),
+        cooldown_after_execution=_get_config_value(self.strategy_config_map, "cooldown_after_execution", 60),
+        max_executors=_get_config_value(self.strategy_config_map, "max_executors", 1),
     )
 
     # 获取连接器
@@ -1617,60 +1761,145 @@ if __name__ == "__main__":
 加密货币数据准备脚本
 
 从 Hummingbot 获取历史数据，转换为 Qlib 格式。
+
+注意：
+1. 数据量必须与日历范围匹配
+2. 使用 get_historical_candles 获取完整历史数据
+3. 训练/验证时间范围必须与 train_model.py 一致
 """
 
 import asyncio
+import argparse
 from pathlib import Path
+from datetime import datetime, timezone
+
 from hummingbot.data_feed.candles_feed.binance_spot_candles import BinanceSpotCandles
+from hummingbot.data_feed.candles_feed.data_types import HistoricalCandlesConfig
 from hummingbot.data_feed.qlib_bridge import DataBridge, CryptoCalendarGenerator
 
 
-async def main():
-    # 配置
-    trading_pairs = ["BTC-USDT", "ETH-USDT"]
-    interval = "1h"
-    output_dir = Path.home() / ".qlib/qlib_data/crypto_data"
+async def fetch_historical_data(
+    trading_pairs: list,
+    interval: str,
+    start_date: str,
+    end_date: str,
+    output_dir: Path,
+):
+    """
+    获取历史数据并保存为 Qlib 格式
+
+    Parameters
+    ----------
+    trading_pairs : list
+        交易对列表
+    interval : str
+        K 线间隔
+    start_date : str
+        开始日期 YYYY-MM-DD
+    end_date : str
+        结束日期 YYYY-MM-DD
+    output_dir : Path
+        输出目录
+    """
+    # 转换日期为时间戳
+    start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
+    end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
 
     # 初始化
     data_bridge = DataBridge()
-    calendar_gen = CryptoCalendarGenerator(
-        start_date="2023-01-01",
-        end_date="2024-12-31"
-    )
-
-    # 生成日历
-    print("Generating calendars...")
-    calendar_gen.generate_all_frequencies(str(output_dir / "calendars"))
 
     # 获取 K 线数据
     all_data = {}
     for pair in trading_pairs:
-        print(f"Fetching {pair} candles...")
-        candles = BinanceSpotCandles(trading_pair=pair, interval=interval, max_records=1000)
-        await candles.start_network()
+        print(f"Fetching {pair} candles from {start_date} to {end_date}...")
 
-        # 等待数据就绪
-        while not candles.ready:
-            await asyncio.sleep(1)
+        candles = BinanceSpotCandles(trading_pair=pair, interval=interval)
 
-        # 转换格式
-        qlib_df = data_bridge.candles_to_qlib(candles.candles_df, pair)
-        all_data[pair] = qlib_df
+        # 使用 get_historical_candles 获取完整历史数据
+        config = HistoricalCandlesConfig(
+            connector_name="binance",
+            trading_pair=pair,
+            interval=interval,
+            start_time=start_ts,
+            end_time=end_ts,
+        )
 
-        await candles.stop_network()
+        try:
+            candles_df = await candles.get_historical_candles(config)
+            print(f"  Fetched {len(candles_df)} candles for {pair}")
+
+            # 转换格式
+            qlib_df = data_bridge.candles_to_qlib(candles_df, pair)
+            all_data[pair] = qlib_df
+        except Exception as e:
+            print(f"  Error fetching {pair}: {e}")
+            continue
+
+    if not all_data:
+        print("No data fetched, exiting.")
+        return
 
     # 合并数据
     merged_df = data_bridge.merge_instruments(all_data)
+    print(f"Total merged records: {len(merged_df)}")
 
-    # 保存为 Qlib 格式
+    # 保存为 Qlib 格式 (传入 freq 参数)
     print("Saving to Qlib format...")
-    data_bridge.to_qlib_provider_format(merged_df, str(output_dir))
+    data_bridge.to_qlib_provider_format(merged_df, str(output_dir), freq=interval)
 
     print(f"Data saved to {output_dir}")
 
 
+def main():
+    parser = argparse.ArgumentParser(description="Prepare crypto data for Qlib")
+    parser.add_argument(
+        "--trading-pairs",
+        type=str,
+        nargs="+",
+        default=["BTC-USDT", "ETH-USDT"],
+        help="Trading pairs to fetch",
+    )
+    parser.add_argument(
+        "--interval",
+        type=str,
+        default="1h",
+        help="Candle interval (1m, 5m, 15m, 1h, 4h, 1d)",
+    )
+    parser.add_argument(
+        "--start-date",
+        type=str,
+        default="2023-01-01",
+        help="Start date (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--end-date",
+        type=str,
+        default="2024-12-31",
+        help="End date (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="~/.qlib/qlib_data/crypto_data",
+        help="Output directory",
+    )
+
+    args = parser.parse_args()
+
+    output_dir = Path(args.output_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    asyncio.run(fetch_historical_data(
+        trading_pairs=args.trading_pairs,
+        interval=args.interval,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        output_dir=output_dir,
+    ))
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
 ```
 
 ---
@@ -1741,7 +1970,7 @@ Enter trading pair (e.g., BTC-USDT): >>> BTC-USDT
 Enter order amount in USD: >>> 100
 Enter model file path: >>> ~/.qlib/models/lgb_model.pkl
 Enter Qlib data path: >>> ~/.qlib/qlib_data/crypto_data
-Enter signal threshold (0-1): >>> 0.6
+Enter signal threshold (e.g., 0.005 for 0.5% return): >>> 0.005
 Enter prediction interval: >>> 1h
 Enter stop loss percentage (e.g., 0.02 for 2%): >>> 0.02
 Enter take profit percentage (e.g., 0.03 for 3%): >>> 0.03
@@ -1989,5 +2218,16 @@ pydantic >= 2.0.0
 
 ---
 
-> **版本**: v5.0.0 (2026-01-02)
+> **版本**: v5.1.0 (2026-01-02)
 > **状态**: 可直接运行的完整方案 (含策略层)
+>
+> **v5.1.0 修复内容**:
+> - 修复 `_compute_features()` 中 `max/min` 改为 `np.maximum/np.minimum`
+> - 修复 `model.predict()` 接口：使用底层 `self.model.model.predict()`
+> - 修复信号阈值逻辑：从概率阈值改为收益率阈值 (默认 0.005)
+> - 修复 SignalBridge 金额单位：添加 `current_price` 参数进行单位转换
+> - 修复日历/数据存储：支持多频率，添加 `freq` 参数
+> - 修复数据准备脚本：使用 `get_historical_candles` 获取完整历史
+> - 修复 start.py：添加 `_get_config_value()` 处理 ConfigVar 类型
+> - 修复文档表述：明确 Hummingbot 需新增模块而非完全不修改
+> - 添加 `get_crypto_config()` 辅助函数简化 Qlib 初始化
