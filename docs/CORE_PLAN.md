@@ -1,6 +1,6 @@
 # AlgVex 核心方案 (P0 - MVP)
 
-> **版本**: v6.1.0 (2026-01-02)
+> **版本**: v6.1.1 (2026-01-02)
 > **状态**: 可直接运行的完整方案
 
 > **Qlib + Hummingbot 融合的加密货币现货量化交易平台**
@@ -715,7 +715,9 @@ class QlibAlphaStrategy(ScriptStrategyBase):
                 max_records=self.config.lookback_bars,
             )
             self.candles_feed = CandlesFactory.get_candle(candles_config)
-            self.logger.info(f"Candles feed initialized: {self.config.trading_pair}")
+            # 必须调用 start() 启动 K 线数据收集
+            self.candles_feed.start()
+            self.logger.info(f"Candles feed initialized and started: {self.config.trading_pair}")
         except Exception as e:
             self.logger.error(f"Failed to initialize candles feed: {e}")
 
@@ -828,7 +830,8 @@ class QlibAlphaStrategy(ScriptStrategyBase):
                 return None
 
             # CandlesBase 对象提供 candles_df 属性
-            if self.candles_feed.is_ready:
+            # 注意：属性名是 ready，不是 is_ready
+            if self.candles_feed.ready:
                 return self.candles_feed.candles_df
             return None
         except Exception as e:
@@ -992,10 +995,25 @@ class QlibAlphaStrategy(ScriptStrategyBase):
         lines.append(f"Trading Pair: {self.config.trading_pair}")
         lines.append(f"Model Loaded: {self.model is not None}")
         lines.append(f"Qlib Initialized: {self.qlib_initialized}")
+        lines.append(f"Candles Ready: {self.candles_feed.ready if self.candles_feed else False}")
         lines.append(f"Current Position: {self.current_position}")
         if self.entry_price > 0:
             lines.append(f"Entry Price: {self.entry_price}")
         return "\n".join(lines)
+
+    # =========================================================================
+    # 生命周期
+    # =========================================================================
+
+    async def on_stop(self):
+        """
+        策略停止时清理资源
+
+        必须停止 candles_feed，否则网络迭代器会永久运行
+        """
+        if self.candles_feed is not None:
+            self.candles_feed.stop()
+            self.logger.info("Candles feed stopped")
 ```
 
 ---
@@ -1206,6 +1224,11 @@ aiohttp >= 3.8.0
 | 订单执行失败 | 检查 API 权限、余额 |
 
 ### C. 变更日志
+
+**v6.1.1** (2026-01-02)
+- 修复属性名：`is_ready` → `ready` (与 CandlesBase 源码一致)
+- 添加 `candles_feed.start()` 调用 (必须启动才能收集数据)
+- 添加 `on_stop()` 生命周期方法 (停止时清理资源)
 
 **v6.1.0** (2026-01-02)
 - 修复 K 线数据获取方式：使用 CandlesFactory 替代不存在的 connector.get_candles()
