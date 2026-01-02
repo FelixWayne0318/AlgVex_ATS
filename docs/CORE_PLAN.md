@@ -1,11 +1,11 @@
 # AlgVex 核心方案 (P0 - MVP)
 
-> **版本**: v7.0.0 (2026-01-02)
+> **版本**: v8.0.0 (2026-01-02)
 > **状态**: 可直接运行的完整方案
 
 > **Qlib + Hummingbot 融合的加密货币现货量化交易平台**
 >
-> 混合方案：Qlib 添加加密货币原生支持，Hummingbot 使用 scripts/ 机制。
+> 混合方案：Qlib 添加加密货币原生支持，Hummingbot 使用 **Strategy V2 框架**。
 
 ---
 
@@ -34,15 +34,16 @@
 │                                                             │
 │  1. 混合修改策略                                             │
 │     - Qlib: 修改源码，添加 REG_CRYPTO 区域支持              │
-│     - Hummingbot: 零修改，使用 scripts/ 脚本策略机制        │
+│     - Hummingbot: 零修改，使用 Strategy V2 框架             │
 │                                                             │
 │  2. 原生支持优于 Workaround                                  │
 │     - Qlib 原生支持加密货币，无需运行时覆盖配置             │
-│     - 代码更清晰，可维护性更高                              │
+│     - Hummingbot 使用官方推荐的 V2 架构                     │
 │                                                             │
-│  3. 桥接逻辑内联                                             │
-│     - 数据转换: 策略脚本私有方法                             │
-│     - 信号执行: 直接调用 self.buy()/self.sell()             │
+│  3. V2 架构优势                                              │
+│     - 数据获取: MarketDataProvider 统一接口                 │
+│     - 订单执行: Executors 自动管理订单生命周期              │
+│     - 策略逻辑: Controllers 抽象可复用                      │
 │                                                             │
 │  4. 可贡献上游                                               │
 │     - Qlib 修改可提交 PR 到 microsoft/qlib                  │
@@ -55,28 +56,35 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     AlgVex 系统架构                          │
+│                     AlgVex 系统架构 (V2)                     │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │  ┌─────────────┐                      ┌─────────────────┐  │
 │  │    Qlib     │                      │   Hummingbot    │  │
-│  │  (修改2文件)│                      │    (不修改)     │  │
+│  │  (修改2文件)│                      │  (Strategy V2)  │  │
 │  │             │                      │                 │  │
 │  │ + REG_CRYPTO│◀────────────────────▶│ - Binance API   │  │
-│  │ - LGBModel  │    scripts/          │ - K线数据       │  │
-│  │ - Alpha158  │    qlib_alpha_       │ - 订单执行      │  │
+│  │ - LGBModel  │    scripts/          │ - V2 框架       │  │
+│  │ - Alpha158  │    qlib_alpha_       │ - Executors     │  │
 │  │             │    strategy.py       │ - 风控管理      │  │
 │  └─────────────┘         │            └─────────────────┘  │
 │                          │                                  │
 │                          ▼                                  │
-│              ┌─────────────────────┐                       │
-│              │   策略脚本 (核心)    │                       │
-│              │                     │                       │
-│              │ - 数据转换 (内联)   │                       │
-│              │ - 特征计算 (内联)   │                       │
-│              │ - 信号生成          │                       │
-│              │ - 交易执行          │                       │
-│              └─────────────────────┘                       │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │              Strategy V2 架构                         │  │
+│  │                                                       │  │
+│  │  Script (StrategyV2Base)                              │  │
+│  │      │                                                │  │
+│  │      ├── MarketDataProvider  ← 统一数据获取接口       │  │
+│  │      │   └── get_candles_df()                         │  │
+│  │      │                                                │  │
+│  │      ├── Controller          ← Qlib 模型预测          │  │
+│  │      │   └── QlibAlphaController                      │  │
+│  │      │                                                │  │
+│  │      └── Executors           ← 订单执行组件           │  │
+│  │          └── PositionExecutor (止损/止盈/时间限制)    │  │
+│  │                                                       │  │
+│  └──────────────────────────────────────────────────────┘  │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -86,8 +94,8 @@
 | 组件 | 修改类型 | 文件数 | 说明 |
 |------|----------|--------|------|
 | **Qlib** | 修改源码 | 2 | 添加 REG_CRYPTO 区域 |
-| **Hummingbot** | 零修改 | 0 | 使用 scripts/ 机制 |
-| **新建脚本** | 新建 | 4 | 数据/训练/策略/配置 |
+| **Hummingbot** | 零修改 | 0 | 使用 Strategy V2 框架 |
+| **新建脚本** | 新建 | 5 | 数据/训练/策略/控制器/配置 |
 
 ---
 
@@ -106,14 +114,15 @@
 |------|----------|------|------|
 | 1 | `scripts/prepare_crypto_data.py` | 新建 | 数据准备脚本 |
 | 2 | `scripts/train_model.py` | 新建 | 模型训练脚本 |
-| 3 | `scripts/qlib_alpha_strategy.py` | 新建 | 策略主脚本 |
-| 4 | `conf/scripts/qlib_alpha.yml` | 新建 | 策略配置 |
+| 3 | `scripts/qlib_alpha_strategy.py` | 新建 | V2 策略主脚本 |
+| 4 | `controllers/qlib_alpha_controller.py` | 新建 | Qlib 信号控制器 |
+| 5 | `conf/controllers/qlib_alpha.yml` | 新建 | 策略配置 |
 
 ### 2.3 Hummingbot
 
 | 框架 | 修改内容 |
 |------|---------|
-| **Hummingbot** | 无修改，使用 `scripts/` 脚本策略机制 |
+| **Hummingbot** | 无修改，使用 Strategy V2 框架 (StrategyV2Base + Executors) |
 
 ---
 
@@ -656,154 +665,116 @@ if __name__ == "__main__":
 
 ---
 
-## 6. 策略脚本
+## 6. 策略脚本 (Strategy V2)
 
-### 6.1 脚本代码
+> **重要**: v8.0.0 采用 Hummingbot 官方推荐的 Strategy V2 架构，
+> 使用 `StrategyV2Base` + `Executors` + `MarketDataProvider`。
 
-**文件路径**: `scripts/qlib_alpha_strategy.py`
+### 6.1 控制器代码
+
+**文件路径**: `controllers/qlib_alpha_controller.py`
 
 ```python
 """
-Qlib Alpha 策略
+Qlib Alpha 控制器
 
-基于 Qlib 机器学习模型的加密货币交易策略。
+基于 Qlib 机器学习模型生成交易信号的控制器。
 
-使用 Hummingbot ScriptStrategyBase，无需修改 Hummingbot 源码。
-
-启动方式:
-    hummingbot
-    >>> start --script qlib_alpha_strategy.py --conf conf/scripts/qlib_alpha.yml
+V2 架构中，Controller 负责:
+1. 从 MarketDataProvider 获取数据
+2. 计算特征和预测信号
+3. 生成 ExecutorAction 供策略执行
 """
 
-import os
 import pickle
 import logging
 from pathlib import Path
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import List, Optional, Set
 
 import numpy as np
 import pandas as pd
-from pydantic import Field
 
 import qlib
 from qlib.constant import REG_CRYPTO
 
-from hummingbot.client.config.config_data_types import BaseClientModel
-from hummingbot.connector.connector_base import ConnectorBase
-from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
-from hummingbot.core.data_type.common import OrderType, TradeType, PositionAction
-from hummingbot.data_feed.candles_feed.candles_factory import CandlesFactory
-from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
+from hummingbot.strategy_v2.controllers.controller_base import ControllerBase, ControllerConfigBase
+from hummingbot.strategy_v2.executors.executor_base import ExecutorBase
+from hummingbot.strategy_v2.executors.position_executor.data_types import (
+    PositionExecutorConfig,
+    TrailingStop,
+    TripleBarrierConfig,
+)
+from hummingbot.strategy_v2.models.executor_actions import (
+    CreateExecutorAction,
+    ExecutorAction,
+    StopExecutorAction,
+)
+from pydantic import Field
 
 
-# =============================================================================
-# 配置类
-# =============================================================================
+class QlibAlphaControllerConfig(ControllerConfigBase):
+    """
+    Qlib Alpha 控制器配置
 
-class QlibAlphaConfig(BaseClientModel):
-    """策略配置 (Pydantic 模型)"""
-
-    # 必须: 脚本文件名 (Hummingbot 要求)
-    script_file_name: str = os.path.basename(__file__)
+    使用 StrategyV2ConfigBase 风格的配置类
+    """
+    controller_name: str = "qlib_alpha"
+    controller_type: str = "directional_trading"
 
     # 交易配置
-    exchange: str = Field(default="binance", description="交易所")
-    trading_pair: str = Field(default="BTC-USDT", description="交易对")
-    order_amount_usd: Decimal = Field(default=Decimal("100"), description="每笔订单金额(USD)")
+    connector_name: str = Field(default="binance")
+    trading_pair: str = Field(default="BTC-USDT")
+    order_amount_usd: Decimal = Field(default=Decimal("100"))
 
     # 模型配置
-    model_path: str = Field(default="~/.qlib/models/lgb_model.pkl", description="模型路径")
-    qlib_data_path: str = Field(default="~/.qlib/qlib_data/crypto_data", description="Qlib数据目录")
+    model_path: str = Field(default="~/.qlib/models/lgb_model.pkl")
+    qlib_data_path: str = Field(default="~/.qlib/qlib_data/crypto_data")
 
     # 信号配置
-    signal_threshold: Decimal = Field(default=Decimal("0.005"), description="信号阈值(收益率)")
-    prediction_interval: str = Field(default="1h", description="预测间隔")
-    lookback_bars: int = Field(default=100, description="回看K线数量")
+    signal_threshold: Decimal = Field(default=Decimal("0.005"))
+    prediction_interval: str = Field(default="1h")
+    lookback_bars: int = Field(default=100)
 
-    # 风控配置 (三重屏障)
-    stop_loss: Decimal = Field(default=Decimal("0.02"), description="止损比例")
-    take_profit: Decimal = Field(default=Decimal("0.03"), description="止盈比例")
-    time_limit: int = Field(default=3600, description="持仓时间限制(秒)")
+    # 三重屏障配置 (用于 PositionExecutor)
+    stop_loss: Decimal = Field(default=Decimal("0.02"))
+    take_profit: Decimal = Field(default=Decimal("0.03"))
+    time_limit: int = Field(default=3600)
 
     # 执行配置
-    cooldown_time: int = Field(default=60, description="交易冷却时间(秒)")
+    cooldown_interval: int = Field(default=60)
+    max_executors_per_side: int = Field(default=1)
 
 
-# =============================================================================
-# 策略主类
-# =============================================================================
-
-class QlibAlphaStrategy(ScriptStrategyBase):
+class QlibAlphaController(ControllerBase):
     """
-    Qlib Alpha 策略
+    Qlib Alpha 控制器
 
-    工作流程:
-    1. 获取 Hummingbot K 线数据
-    2. 计算 Alpha158 因子 (内联)
-    3. 调用 Qlib 模型预测
-    4. 根据阈值生成信号
-    5. 执行交易 + 三重屏障风控
+    V2 架构中的核心组件，负责:
+    1. 接收 MarketDataProvider 数据
+    2. 调用 Qlib 模型预测
+    3. 生成 PositionExecutor 动作
     """
 
-    @classmethod
-    def init_markets(cls, config: QlibAlphaConfig):
-        """
-        初始化市场配置 (Hummingbot 在创建 connectors 前调用)
-
-        重要: 必须使用 classmethod，不能在 __init__ 中设置
-        参考: hummingbot/scripts/simple_pmm.py
-        """
-        cls.markets = {config.exchange: {config.trading_pair}}
-
-    def __init__(self, connectors: Dict[str, ConnectorBase], config: QlibAlphaConfig):
-        super().__init__(connectors)
+    def __init__(self, config: QlibAlphaControllerConfig, *args, **kwargs):
+        super().__init__(config, *args, **kwargs)
         self.config = config
         self.logger = logging.getLogger(__name__)
 
-        # 状态
+        # 模型状态
         self.model = None
         self.qlib_initialized = False
         self.last_signal_time = 0
-        self.current_position = Decimal("0")
-        self.entry_price = Decimal("0")
-        self.entry_time = 0
-
-        # K 线数据源 (使用 CandlesFactory)
-        self.candles_feed = None
-        self._init_candles_feed()
 
         # 初始化
         self._init_qlib()
         self._load_model()
 
-    # =========================================================================
-    # 初始化
-    # =========================================================================
-
-    def _init_candles_feed(self):
-        """初始化 K 线数据源"""
-        try:
-            candles_config = CandlesConfig(
-                connector=self.config.exchange,
-                trading_pair=self.config.trading_pair,
-                interval=self.config.prediction_interval,
-                max_records=self.config.lookback_bars,
-            )
-            self.candles_feed = CandlesFactory.get_candle(candles_config)
-            # 必须调用 start() 启动 K 线数据收集
-            self.candles_feed.start()
-            self.logger.info(f"Candles feed initialized and started: {self.config.trading_pair}")
-        except Exception as e:
-            self.logger.error(f"Failed to initialize candles feed: {e}")
-
     def _init_qlib(self):
         """初始化 Qlib (使用 REG_CRYPTO 区域)"""
         try:
             qlib_path = Path(self.config.qlib_data_path).expanduser()
-            # 使用 REG_CRYPTO，无需手动覆盖配置
             qlib.init(provider_uri=str(qlib_path), region=REG_CRYPTO)
-
             self.qlib_initialized = True
             self.logger.info("Qlib initialized with REG_CRYPTO")
         except Exception as e:
@@ -822,32 +793,56 @@ class QlibAlphaStrategy(ScriptStrategyBase):
         except Exception as e:
             self.logger.error(f"Failed to load model: {e}")
 
-    # =========================================================================
-    # 核心逻辑: on_tick
-    # =========================================================================
+    async def update_processed_data(self):
+        """
+        更新处理后的数据 (V2 框架回调)
 
-    def on_tick(self):
-        """每秒触发"""
+        从 MarketDataProvider 获取 K 线数据
+        """
+        try:
+            # 使用 MarketDataProvider 获取 K 线数据
+            candles_df = self.market_data_provider.get_candles_df(
+                connector_name=self.config.connector_name,
+                trading_pair=self.config.trading_pair,
+                interval=self.config.prediction_interval,
+                max_records=self.config.lookback_bars,
+            )
+            self.processed_data["candles"] = candles_df
+        except Exception as e:
+            self.logger.debug(f"Failed to get candles: {e}")
+            self.processed_data["candles"] = None
+
+    def determine_executor_actions(self) -> List[ExecutorAction]:
+        """
+        确定执行动作 (V2 框架核心方法)
+
+        Returns
+        -------
+        List[ExecutorAction]
+            要执行的动作列表 (CreateExecutorAction / StopExecutorAction)
+        """
+        actions = []
+
         # 检查冷却时间
-        current_time = self.current_timestamp
-        if current_time - self.last_signal_time < self.config.cooldown_time:
-            return
+        current_time = self.market_data_provider.time()
+        if current_time - self.last_signal_time < self.config.cooldown_interval:
+            return actions
 
-        # 检查三重屏障
-        if self.current_position != 0:
-            self._check_triple_barrier()
-            return
+        # 检查是否已有活跃的 Executor
+        active_executors = self.get_active_executors()
+        if len(active_executors) >= self.config.max_executors_per_side:
+            return actions
 
         # 获取信号
         signal = self._get_signal()
 
         if signal != 0:
-            self._execute_signal(signal)
-            self.last_signal_time = current_time
+            action = self._create_position_executor(signal)
+            if action:
+                actions.append(action)
+                self.last_signal_time = current_time
 
-    # =========================================================================
-    # 信号生成 (内联桥接逻辑)
-    # =========================================================================
+        return actions
 
     def _get_signal(self) -> int:
         """
@@ -861,13 +856,12 @@ class QlibAlphaStrategy(ScriptStrategyBase):
         if not self.qlib_initialized or self.model is None:
             return 0
 
-        try:
-            # 获取 K 线数据
-            candles = self._get_candles()
-            if candles is None or len(candles) < 60:
-                return 0
+        candles = self.processed_data.get("candles")
+        if candles is None or len(candles) < 60:
+            return 0
 
-            # 计算特征 (内联桥接逻辑)
+        try:
+            # 计算特征
             features = self._compute_features(candles)
             if features is None or features.empty:
                 return 0
@@ -891,32 +885,8 @@ class QlibAlphaStrategy(ScriptStrategyBase):
             self.logger.error(f"Error getting signal: {e}")
             return 0
 
-    def _get_candles(self) -> Optional[pd.DataFrame]:
-        """
-        获取 K 线数据
-
-        使用初始化时创建的 CandlesFactory 数据源
-        """
-        try:
-            # 使用初始化时创建的 candles_feed
-            if self.candles_feed is None:
-                return None
-
-            # CandlesBase 对象提供 candles_df 属性
-            # 注意：属性名是 ready，不是 is_ready
-            if self.candles_feed.ready:
-                return self.candles_feed.candles_df
-            return None
-        except Exception as e:
-            self.logger.debug(f"Failed to get candles: {e}")
-            return None
-
     def _compute_features(self, candles: pd.DataFrame) -> Optional[pd.DataFrame]:
-        """
-        计算 Alpha158 因子 (内联桥接逻辑)
-
-        与 train_model.py 使用相同的特征，确保训练/推理一致
-        """
+        """计算 Alpha158 因子"""
         try:
             df = candles.copy()
 
@@ -962,146 +932,215 @@ class QlibAlphaStrategy(ScriptStrategyBase):
             self.logger.error(f"Error computing features: {e}")
             return None
 
-    # =========================================================================
-    # 交易执行 (直接用 Hummingbot API)
-    # =========================================================================
+    def _create_position_executor(self, signal: int) -> Optional[CreateExecutorAction]:
+        """
+        创建 PositionExecutor 动作
 
-    def _execute_signal(self, signal: int):
-        """执行交易信号"""
-        connector = self.connectors.get(self.config.exchange)
-        if connector is None:
-            return
-
-        # 获取当前价格
-        mid_price = connector.get_mid_price(self.config.trading_pair)
-        if mid_price is None or mid_price <= 0:
-            return
-
-        # 计算下单数量
-        amount = self.config.order_amount_usd / mid_price
-
-        if signal > 0:
-            # 买入
-            self.buy(
-                connector_name=self.config.exchange,
+        使用 TripleBarrierConfig 配置止损/止盈/时间限制
+        """
+        try:
+            # 获取当前价格
+            mid_price = self.market_data_provider.get_price_by_type(
+                connector_name=self.config.connector_name,
                 trading_pair=self.config.trading_pair,
+                price_type="mid",
+            )
+
+            if mid_price is None or mid_price <= 0:
+                return None
+
+            # 计算下单数量
+            amount = self.config.order_amount_usd / mid_price
+
+            # 三重屏障配置
+            triple_barrier = TripleBarrierConfig(
+                stop_loss=self.config.stop_loss,
+                take_profit=self.config.take_profit,
+                time_limit=self.config.time_limit,
+            )
+
+            # 创建 PositionExecutor 配置
+            executor_config = PositionExecutorConfig(
+                timestamp=self.market_data_provider.time(),
+                connector_name=self.config.connector_name,
+                trading_pair=self.config.trading_pair,
+                side="BUY" if signal > 0 else "SELL",
                 amount=amount,
-                order_type=OrderType.MARKET,
+                triple_barrier_config=triple_barrier,
             )
-            self.current_position = amount
-            self.entry_price = mid_price
-            self.entry_time = self.current_timestamp
-            self.logger.info(f"BUY executed: {amount} @ {mid_price}")
 
-        elif signal < 0 and self.current_position > 0:
-            # 卖出 (平仓)
-            self.sell(
-                connector_name=self.config.exchange,
-                trading_pair=self.config.trading_pair,
-                amount=self.current_position,
-                order_type=OrderType.MARKET,
+            self.logger.info(
+                f"Creating PositionExecutor: {executor_config.side} "
+                f"{amount} @ {mid_price}"
             )
-            self.logger.info(f"SELL executed: {self.current_position} @ {mid_price}")
-            self.current_position = Decimal("0")
-            self.entry_price = Decimal("0")
 
-    # =========================================================================
-    # 三重屏障风控
-    # =========================================================================
-
-    def _check_triple_barrier(self):
-        """三重屏障检查: 止损/止盈/时间限制"""
-        if self.current_position == 0:
-            return
-
-        connector = self.connectors.get(self.config.exchange)
-        if connector is None:
-            return
-
-        current_price = connector.get_mid_price(self.config.trading_pair)
-        if current_price is None:
-            return
-
-        # 计算收益率
-        pnl_pct = (current_price - self.entry_price) / self.entry_price
-
-        # 持仓时间
-        holding_time = self.current_timestamp - self.entry_time
-
-        should_close = False
-        reason = ""
-
-        # 止损
-        if pnl_pct < -float(self.config.stop_loss):
-            should_close = True
-            reason = f"Stop Loss triggered: {pnl_pct:.2%}"
-
-        # 止盈
-        elif pnl_pct > float(self.config.take_profit):
-            should_close = True
-            reason = f"Take Profit triggered: {pnl_pct:.2%}"
-
-        # 时间限制
-        elif holding_time > self.config.time_limit:
-            should_close = True
-            reason = f"Time Limit triggered: {holding_time}s"
-
-        if should_close:
-            self.logger.info(f"Closing position: {reason}")
-            self.sell(
-                connector_name=self.config.exchange,
-                trading_pair=self.config.trading_pair,
-                amount=self.current_position,
-                order_type=OrderType.MARKET,
+            return CreateExecutorAction(
+                controller_id=self.config.controller_name,
+                executor_config=executor_config,
             )
-            self.current_position = Decimal("0")
-            self.entry_price = Decimal("0")
 
-    # =========================================================================
-    # 状态显示
-    # =========================================================================
+        except Exception as e:
+            self.logger.error(f"Error creating executor: {e}")
+            return None
+
+    def get_active_executors(self) -> List[ExecutorBase]:
+        """获取活跃的 Executors"""
+        return [
+            executor
+            for executor in self.executors_info
+            if executor.is_active
+        ]
+```
+
+### 6.2 策略脚本代码
+
+**文件路径**: `scripts/qlib_alpha_strategy.py`
+
+```python
+"""
+Qlib Alpha V2 策略
+
+基于 Qlib 机器学习模型的加密货币交易策略。
+
+使用 Hummingbot Strategy V2 框架:
+- StrategyV2Base (替代 ScriptStrategyBase)
+- MarketDataProvider (替代 CandlesFactory)
+- PositionExecutor (替代 buy()/sell())
+
+启动方式:
+    hummingbot
+    >>> start --script qlib_alpha_strategy.py --conf conf/controllers/qlib_alpha.yml
+"""
+
+import logging
+from decimal import Decimal
+from typing import Dict, Set
+
+from pydantic import Field
+
+from hummingbot.connector.connector_base import ConnectorBase
+from hummingbot.strategy_v2.strategy_v2_base import StrategyV2Base, StrategyV2ConfigBase
+from hummingbot.strategy_v2.models.executor_actions import ExecutorAction
+
+# 导入控制器
+from controllers.qlib_alpha_controller import (
+    QlibAlphaController,
+    QlibAlphaControllerConfig,
+)
+
+
+class QlibAlphaStrategyConfig(StrategyV2ConfigBase):
+    """
+    V2 策略配置
+
+    继承自 StrategyV2ConfigBase，支持:
+    - 动态配置更新 (config_update_interval)
+    - 多控制器管理
+    """
+    script_file_name: str = "qlib_alpha_strategy.py"
+    controllers_config: list = Field(default=[])
+
+    # 可以在 YAML 中直接配置控制器
+    # 或者在这里定义默认值
+
+
+class QlibAlphaStrategy(StrategyV2Base):
+    """
+    Qlib Alpha V2 策略
+
+    V2 架构工作流程:
+    1. MarketDataProvider 自动管理 K 线数据
+    2. Controller 调用 Qlib 模型生成信号
+    3. PositionExecutor 自动管理订单生命周期 (含三重屏障)
+    """
+
+    @classmethod
+    def init_markets(cls, config: QlibAlphaStrategyConfig):
+        """初始化市场配置"""
+        # 从控制器配置中提取交易对
+        cls.markets = {}
+        for controller_config in config.controllers_config:
+            connector = controller_config.get("connector_name", "binance")
+            trading_pair = controller_config.get("trading_pair", "BTC-USDT")
+            if connector not in cls.markets:
+                cls.markets[connector] = set()
+            cls.markets[connector].add(trading_pair)
+
+    def __init__(self, connectors: Dict[str, ConnectorBase], config: QlibAlphaStrategyConfig):
+        super().__init__(connectors, config)
+        self.logger = logging.getLogger(__name__)
+
+    def create_actions_proposal(self) -> list[ExecutorAction]:
+        """
+        创建执行动作提案 (V2 核心方法)
+
+        遍历所有控制器，收集 ExecutorAction
+        """
+        actions = []
+        for controller in self.controllers.values():
+            controller_actions = controller.determine_executor_actions()
+            actions.extend(controller_actions)
+        return actions
 
     def format_status(self) -> str:
         """状态显示"""
         lines = []
-        lines.append(f"Exchange: {self.config.exchange}")
-        lines.append(f"Trading Pair: {self.config.trading_pair}")
-        lines.append(f"Model Loaded: {self.model is not None}")
-        lines.append(f"Qlib Initialized: {self.qlib_initialized}")
-        lines.append(f"Candles Ready: {self.candles_feed.ready if self.candles_feed else False}")
-        lines.append(f"Current Position: {self.current_position}")
-        if self.entry_price > 0:
-            lines.append(f"Entry Price: {self.entry_price}")
+        lines.append("=== Qlib Alpha V2 Strategy ===")
+        lines.append(f"Controllers: {len(self.controllers)}")
+
+        for name, controller in self.controllers.items():
+            lines.append(f"\n[Controller: {name}]")
+            lines.append(f"  Qlib Initialized: {controller.qlib_initialized}")
+            lines.append(f"  Model Loaded: {controller.model is not None}")
+            active = len(controller.get_active_executors())
+            lines.append(f"  Active Executors: {active}")
+
         return "\n".join(lines)
+```
 
-    # =========================================================================
-    # 生命周期
-    # =========================================================================
+### 6.3 V2 vs V1 架构对比
 
-    async def on_stop(self):
-        """
-        策略停止时清理资源
-
-        必须停止 candles_feed，否则网络迭代器会永久运行
-        """
-        if self.candles_feed is not None:
-            self.candles_feed.stop()
-            self.logger.info("Candles feed stopped")
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    V1 vs V2 架构对比                         │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  V1 (ScriptStrategyBase) - 已弃用                           │
+│  ─────────────────────────────────────                      │
+│  - 手动调用 buy()/sell()                                    │
+│  - 手动管理 CandlesFactory                                  │
+│  - 手动实现三重屏障                                         │
+│  - 配置类: BaseClientModel                                  │
+│                                                             │
+│  V2 (StrategyV2Base) - 推荐                                 │
+│  ─────────────────────────────────────                      │
+│  - Executors 自动管理订单                                   │
+│  - MarketDataProvider 统一数据接口                          │
+│  - TripleBarrierConfig 内置支持                             │
+│  - 配置类: StrategyV2ConfigBase                             │
+│  - 支持动态配置更新                                         │
+│  - 支持多控制器                                             │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## 7. 配置文件
 
-### 7.1 策略配置
+### 7.1 控制器配置
 
-**文件路径**: `conf/scripts/qlib_alpha.yml`
+**文件路径**: `conf/controllers/qlib_alpha.yml`
 
 ```yaml
-# Qlib Alpha 策略配置
+# Qlib Alpha V2 控制器配置
+
+# 控制器元信息
+controller_name: qlib_alpha
+controller_type: directional_trading
 
 # 交易配置
-exchange: binance
+connector_name: binance
 trading_pair: BTC-USDT
 order_amount_usd: 100
 
@@ -1114,13 +1153,45 @@ signal_threshold: 0.005    # 0.5% 收益率阈值
 prediction_interval: 1h
 lookback_bars: 100
 
-# 风控配置 (三重屏障)
+# 三重屏障配置 (PositionExecutor 自动管理)
 stop_loss: 0.02            # 2% 止损
 take_profit: 0.03          # 3% 止盈
 time_limit: 3600           # 1小时持仓限制
 
 # 执行配置
-cooldown_time: 60          # 60秒冷却
+cooldown_interval: 60      # 60秒冷却
+max_executors_per_side: 1  # 每方向最多1个执行器
+```
+
+### 7.2 策略配置
+
+**文件路径**: `conf/scripts/qlib_alpha_v2.yml`
+
+```yaml
+# Qlib Alpha V2 策略配置
+
+# V2 策略支持多控制器
+controllers_config:
+  - controller_name: qlib_alpha
+    controller_type: directional_trading
+    connector_name: binance
+    trading_pair: BTC-USDT
+    order_amount_usd: 100
+    model_path: ~/.qlib/models/lgb_model.pkl
+    qlib_data_path: ~/.qlib/qlib_data/crypto_data
+    signal_threshold: 0.005
+    prediction_interval: 1h
+    lookback_bars: 100
+    stop_loss: 0.02
+    take_profit: 0.03
+    time_limit: 3600
+    cooldown_interval: 60
+    max_executors_per_side: 1
+
+# 可添加多个控制器实现多品种交易
+# - controller_name: qlib_alpha_eth
+#   trading_pair: ETH-USDT
+#   ...
 ```
 
 ---
@@ -1131,7 +1202,7 @@ cooldown_time: 60          # 60秒冷却
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      完整运行流程                            │
+│                   完整运行流程 (V2)                          │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │  Step 0: 修改 Qlib 源码 (仅首次)                            │
@@ -1154,9 +1225,9 @@ cooldown_time: 60          # 60秒冷却
 │  >>> connect binance                                        │
 │  >>> [输入 API Key 和 Secret]                               │
 │                                                             │
-│  Step 4: 启动策略                                           │
+│  Step 4: 启动 V2 策略                                       │
 │  >>> start --script qlib_alpha_strategy.py \               │
-│            --conf conf/scripts/qlib_alpha.yml              │
+│            --conf conf/scripts/qlib_alpha_v2.yml           │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -1183,11 +1254,11 @@ python scripts/train_model.py \
     --valid-end 2024-12-31 \
     --freq 1h
 
-# 启动策略
+# 启动 V2 策略
 cd hummingbot
 ./start
 >>> connect binance
->>> start --script qlib_alpha_strategy.py --conf conf/scripts/qlib_alpha.yml
+>>> start --script qlib_alpha_strategy.py --conf conf/scripts/qlib_alpha_v2.yml
 ```
 
 ### 8.3 Paper Trading
@@ -1195,7 +1266,7 @@ cd hummingbot
 ```bash
 # 使用 Binance Testnet
 >>> connect binance_paper_trade
->>> start --script qlib_alpha_strategy.py --conf conf/scripts/qlib_alpha.yml
+>>> start --script qlib_alpha_strategy.py --conf conf/scripts/qlib_alpha_v2.yml
 ```
 
 ---
@@ -1209,12 +1280,12 @@ cd hummingbot
 | 1 | Qlib 修改 | 导入 REG_CRYPTO | 无报错 |
 | 2 | 数据准备 | 运行 prepare_crypto_data.py | 生成 Qlib 格式数据 |
 | 3 | 模型训练 | 运行 train_model.py | 模型文件生成 |
-| 4 | Qlib 初始化 | 策略启动 | region=crypto |
-| 5 | K 线获取 | 策略运行 | 获取足够数据 |
-| 6 | 特征计算 | 策略运行 | 特征矩阵非空 |
-| 7 | 信号生成 | 策略运行 | 返回 -1/0/1 |
-| 8 | 订单执行 | 策略运行 | 订单成功 |
-| 9 | 三重屏障 | 触发条件 | 自动平仓 |
+| 4 | Qlib 初始化 | Controller 启动 | region=crypto |
+| 5 | MarketDataProvider | Controller 运行 | get_candles_df() 返回数据 |
+| 6 | 特征计算 | Controller 运行 | 特征矩阵非空 |
+| 7 | 信号生成 | Controller 运行 | 返回 -1/0/1 |
+| 8 | PositionExecutor | 策略运行 | Executor 创建成功 |
+| 9 | 三重屏障 | 触发条件 | Executor 自动关闭 |
 | 10 | Paper Trading | 模拟交易 24h | 无异常 |
 
 ### 9.2 验证脚本
@@ -1302,17 +1373,29 @@ aiohttp >= 3.8.0
 | REG_CRYPTO 未定义 | 检查 constant.py 修改是否生效 |
 | Qlib 初始化失败 | 检查数据目录路径是否正确 |
 | 模型加载失败 | 先运行 train_model.py |
-| K 线数据不足 | 等待 Hummingbot 收集数据 |
+| MarketDataProvider 返回空 | 等待数据收集或检查 trading_pair 格式 |
 | 信号一直为 0 | 调整 signal_threshold |
-| 订单执行失败 | 检查 API 权限、余额 |
+| Executor 创建失败 | 检查 API 权限、余额、配置格式 |
+| Controller 未找到 | 检查 controllers/ 目录和导入路径 |
 
 ### C. 变更日志
+
+**v8.0.0** (2026-01-02)
+- **重大升级**: 采用 Hummingbot Strategy V2 架构
+- 基类: `ScriptStrategyBase` → `StrategyV2Base`
+- 数据获取: `CandlesFactory` → `MarketDataProvider.get_candles_df()`
+- 订单执行: `buy()/sell()` → `PositionExecutor` + `TripleBarrierConfig`
+- 配置类: `BaseClientModel` → `StrategyV2ConfigBase`
+- 新增: `QlibAlphaController` 控制器，分离信号逻辑
+- 新增: 支持多控制器、动态配置更新
+- 符合 Hummingbot 官方推荐的现代架构
 
 **v7.0.0** (2026-01-02)
 - 采用混合修改策略：Qlib 修改源码，Hummingbot 零修改
 - Qlib: 添加 REG_CRYPTO 区域配置 (constant.py, config.py)
 - 移除运行时 C 配置覆盖，使用原生 region 支持
 - 代码更清晰，可维护性更高
+- ⚠️ 使用 ScriptStrategyBase (已被 v8.0.0 取代)
 
 **v6.2.0** (2026-01-02)
 - 修复 markets 定义：使用 `init_markets` classmethod (参考 simple_pmm.py)
