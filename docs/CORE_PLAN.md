@@ -1,6 +1,6 @@
 # AlgVex 核心方案 (P0 - MVP)
 
-> **版本**: v9.0.1 (2026-01-02)
+> **版本**: v9.0.2 (2026-01-02)
 > **状态**: 可直接运行的完整方案
 
 > **Qlib + Hummingbot 融合的加密货币现货量化交易平台**
@@ -158,10 +158,13 @@ def init_qlib_crypto(provider_uri: str):
     qlib.init(provider_uri=provider_uri, region="us")
 
     # 运行时覆盖配置
-    C["trade_unit"] = 0.00001       # 加密货币最小交易单位
+    # 注意: trade_unit 设为 1，避免小数导致撮合时整数取整问题
+    # 最小下单量约束交给 Hummingbot / 交易所规则处理
+    C["trade_unit"] = 1
     C["limit_threshold"] = None     # 无涨跌停限制
     C["deal_price"] = "close"       # 收盘价成交
-    C["time_per_step"] = "60min"    # 小时级数据
+    # 注意: time_per_step 应在 backtest executor kwargs 中设置为 "60min"
+    # 而非在此处设置，更符合 Qlib 常见配置落点
 
     print(f"Qlib initialized for crypto (provider: {provider_uri})")
     print(f"  trade_unit: {C['trade_unit']}")
@@ -236,10 +239,10 @@ REG_CRYPTO = "crypto"
          "deal_price": "close",
      },
 +    REG_CRYPTO: {
-+        "trade_unit": 0.00001,      # 加密货币最小交易单位
++        "trade_unit": 1,            # 设为 1，避免 Qlib 撮合时整数取整问题
 +        "limit_threshold": None,    # 无涨跌停限制
 +        "deal_price": "close",
-+        "time_per_step": "60min",   # Qlib 要求字符串格式
++        # 注意: time_per_step 应在 backtest executor kwargs 中设置
 +    },
  }
 ```
@@ -256,7 +259,7 @@ from qlib.config import C
 qlib.init(provider_uri="~/.qlib/qlib_data/crypto_data", region=REG_CRYPTO)
 
 # 验证配置
-print(f"trade_unit: {C['trade_unit']}")        # 0.00001
+print(f"trade_unit: {C['trade_unit']}")        # 1
 print(f"limit_threshold: {C['limit_threshold']}")  # None
 print(f"region: {C['region']}")                # crypto
 ```
@@ -265,7 +268,7 @@ print(f"region: {C['region']}")                # crypto
 
 ## 4. 数据准备
 
-### 4.1 频率命名规范 (v9.0.1)
+### 4.1 频率命名规范 (v9.0.2)
 
 > **重要**: Qlib 和 Binance 对频率的命名不同，必须做映射。
 
@@ -292,6 +295,9 @@ FREQ_MAPPING = {
 > ⚠️ **风险提示**: Qlib 回测链路对 freq 参数处理有已知问题，
 > 使用非标准命名 (如整数 `60` 或 `1h`) 可能触发"找 day 数据"等错误。
 > 建议统一使用 `"60min"` 格式。
+>
+> **注意**: Qlib 官方文档和源码对 `"1h"` 缺乏明确背书，
+> 虽然部分情况下可能工作，但 `"60min"` 是更安全的选择。
 
 ### 4.2 为何不使用 Qlib 官方加密货币收集器
 
@@ -657,6 +663,11 @@ np.hstack([start_index, data]).tofile(file_path)
 np.hstack([date_index, _df[field]]).astype("<f").tofile(...)
 ```
 
+**关键差异:**
+- **官方实现**: `date_index` 是每条数据对应的日历位置索引数组，与字段数据一起 hstack 后写入
+- **我们的实现**: 仅用 `[0]` 作为起始索引，假设数据从日历第一条开始且连续
+- **影响**: 如果数据有缺口或不从日历起点开始，官方读取逻辑可能出现对齐偏移
+
 **风险评估:**
 
 | 风险点 | 说明 | 缓解措施 |
@@ -844,36 +855,82 @@ class FeatureNormalizer:
     def __init__(self):
         self.mean = None
         self.std = None
+        self.feature_columns = None  # 训练时的特征列顺序
         self.fitted = False
 
     def fit_transform(self, features: pd.DataFrame) -> pd.DataFrame:
-        """训练时使用: 计算统计量并归一化"""
+        """
+        训练时使用: 计算统计量并归一化
+
+        ⚠️ 防泄漏注意: 仅用训练集调用此方法!
+        验证集/测试集应使用 transform()，避免未来数据泄漏到统计量中。
+        """
         self.mean = features.mean()
         self.std = features.std() + 1e-8  # 避免除零
         self.fitted = True
+        self.feature_columns = list(features.columns)  # 记录训练时的特征列
         return (features - self.mean) / self.std
 
     def transform(self, features: pd.DataFrame) -> pd.DataFrame:
-        """预测时使用: 使用保存的统计量归一化"""
+        """
+        预测时使用: 使用保存的统计量归一化
+
+        包含特征对齐防呆机制:
+        - 缺失列: 填充 NaN + 告警
+        - 多余列: 丢弃 + 告警
+        - 顺序: 强制重排为训练时顺序
+        """
         if not self.fitted:
             raise ValueError("Normalizer not fitted. Call fit_transform first.")
+
+        # 特征对齐防呆机制
+        expected_cols = set(self.feature_columns)
+        actual_cols = set(features.columns)
+
+        missing_cols = expected_cols - actual_cols
+        extra_cols = actual_cols - expected_cols
+
+        if missing_cols:
+            import warnings
+            warnings.warn(f"⚠️ 缺失特征列 (将填充 NaN): {missing_cols}")
+            for col in missing_cols:
+                features[col] = np.nan
+
+        if extra_cols:
+            import warnings
+            warnings.warn(f"⚠️ 多余特征列 (将丢弃): {extra_cols}")
+            features = features.drop(columns=list(extra_cols))
+
+        # 强制重排为训练时顺序
+        features = features[self.feature_columns]
+
         return (features - self.mean) / self.std
 
     def save(self, path: str):
-        """保存归一化参数"""
+        """保存归一化参数 (含特征列顺序)"""
         import pickle
         with open(path, "wb") as f:
-            pickle.dump({"mean": self.mean, "std": self.std}, f)
+            pickle.dump({
+                "mean": self.mean,
+                "std": self.std,
+                "feature_columns": self.feature_columns,
+            }, f)
 
     def load(self, path: str):
-        """加载归一化参数"""
+        """加载归一化参数 (含特征列顺序)"""
         import pickle
         with open(path, "rb") as f:
             params = pickle.load(f)
         self.mean = params["mean"]
         self.std = params["std"]
+        self.feature_columns = params.get("feature_columns", list(self.mean.index))
         self.fitted = True
 ```
+
+> ⚠️ **Normalizer 防泄漏警告**:
+> - `fit_transform()` 只能用于训练集
+> - 验证集、测试集、回测、实盘均使用 `transform()`
+> - 如果在整个数据集上调用 `fit_transform()` 会导致未来数据泄漏到 mean/std 统计量中
 
 ### 5.3 训练脚本
 
@@ -918,9 +975,11 @@ from unified_features import (
 def init_qlib_crypto(provider_uri: str):
     """初始化 Qlib 用于加密货币 (无需修改源码)"""
     qlib.init(provider_uri=provider_uri, region="us")
-    C["trade_unit"] = 0.00001
+    # trade_unit 设为 1，避免 Qlib 撮合时整数取整问题
+    # 最小下单量约束交给 Hummingbot / 交易所规则处理
+    C["trade_unit"] = 1
     C["limit_threshold"] = None
-    C["time_per_step"] = "60min"
+    # 注意: time_per_step 应在 backtest executor kwargs 中设置为 "60min"
 
 
 def load_qlib_data(instruments: list, start_time: str, end_time: str, freq: str) -> pd.DataFrame:
@@ -2154,7 +2213,7 @@ def verify_qlib_crypto() -> bool:
         qlib.init(provider_uri=str(data_path), region=REG_CRYPTO)
 
         assert C["region"] == "crypto", f"Expected crypto, got {C['region']}"
-        assert C["trade_unit"] == 0.00001, f"Expected 0.00001, got {C['trade_unit']}"
+        assert C["trade_unit"] == 1, f"Expected 1, got {C['trade_unit']}"
         assert C["limit_threshold"] is None, f"Expected None, got {C['limit_threshold']}"
         print("   ✓ REG_CRYPTO working correctly")
         return True
@@ -2399,6 +2458,27 @@ aiohttp >= 3.8.0
 | Controller 未找到 | 检查 controllers/ 目录和导入路径 |
 
 ### C. 变更日志
+
+**v9.0.2** (2026-01-02) - 专家反馈精细修正
+- **修正**: `time_per_step` 配置位置说明
+  - 明确应在 backtest executor kwargs 中设置，而非 `C[]`
+  - 更新方案 A 和方案 B 的代码注释
+- **修正**: `trade_unit` 值从 `0.00001` 改为 `1`
+  - 避免 Qlib 撮合时整数取整问题
+  - 最小下单量约束交给 Hummingbot / 交易所规则处理
+- **增强**: 频率命名说明补充
+  - 添加 Qlib 对 `"1h"` 缺乏官方背书的警告
+- **增强**: `.bin` 格式差异说明补充
+  - 添加官方 dump_bin.py 的 hstack 关键差异解释
+  - 说明 date_index 与我们简化实现的区别
+- **增强**: 特征对齐防呆机制 (FeatureNormalizer.transform)
+  - 缺失列: 填充 NaN + 告警
+  - 多余列: 丢弃 + 告警
+  - 顺序: 强制重排为训练时顺序
+- **增强**: Normalizer 防泄漏警告
+  - `fit_transform()` 仅用于训练集
+  - 验证集/测试集/回测/实盘使用 `transform()`
+  - 保存/加载时包含 feature_columns
 
 **v9.0.1** (2026-01-02) - 专家反馈修复
 - **优化**: 统一 Qlib freq 为 `"60min"` (不使用 `"1h"` 或整数 `60`)
