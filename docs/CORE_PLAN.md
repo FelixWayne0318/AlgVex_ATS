@@ -239,7 +239,21 @@ def get_crypto_config(provider_uri: str = "~/.qlib/qlib_data/crypto_data") -> di
 
 ---
 
-### 3.3 修改 data/data.py
+### 3.3 修改 data/data.py (可选)
+
+> **使用说明**:
+>
+> `CryptoCalendarProvider` 是一个**可选的备用方案**。
+>
+> **当前推荐方案**: 使用 `LocalCalendarProvider` + 预生成的日历文件
+> - 由 `prepare_crypto_data.py` 生成 `calendars/1h.txt` 等文件
+> - 在 `get_crypto_config()` 中配置 `calendar_provider: LocalCalendarProvider`
+>
+> **此类的用途**: 动态生成 24/7 日历（无需预生成文件）
+> - 适用于需要动态时间范围的场景
+> - 如果使用此类，需要在 `qlib.init()` 中指定 `calendar_provider: CryptoCalendarProvider`
+>
+> **建议**: MVP 阶段使用预生成日历文件方案，此类作为未来扩展保留。
 
 **文件路径**: `qlib/qlib/data/data.py`
 
@@ -248,6 +262,7 @@ def get_crypto_config(provider_uri: str = "~/.qlib/qlib_data/crypto_data") -> di
 **新增代码**:
 ```python
 # 在第 676 行之后添加
+# 【可选】此类为备用方案，MVP 阶段使用 LocalCalendarProvider + 预生成日历文件
 
 class CryptoCalendarProvider(CalendarProvider):
     """
@@ -447,9 +462,13 @@ class DataBridge:
         # 标准化交易对名称: BTC-USDT → btcusdt
         instrument = self._normalize_trading_pair(trading_pair)
 
-        # 转换时间戳
+        # 转换时间戳 (自动检测秒/毫秒)
         df = candles_df.copy()
-        df["datetime"] = pd.to_datetime(df["timestamp"], unit='s', utc=True)
+        df["datetime"] = pd.to_datetime(
+            df["timestamp"],
+            unit=self._detect_timestamp_unit(df["timestamp"]),
+            utc=True
+        )
         df["instrument"] = instrument
 
         # 计算 VWAP (成交量加权平均价格)
@@ -508,6 +527,37 @@ class DataBridge:
         BTCUSDT → btcusdt
         """
         return trading_pair.lower().replace("-", "").replace("_", "")
+
+    def _detect_timestamp_unit(self, timestamps: pd.Series) -> str:
+        """
+        自动检测时间戳单位（秒或毫秒）
+
+        Hummingbot 不同版本可能使用不同单位：
+        - 秒级时间戳：约 10 位数字（如 1704067200）
+        - 毫秒时间戳：约 13 位数字（如 1704067200000）
+
+        Parameters
+        ----------
+        timestamps : pd.Series
+            时间戳列
+
+        Returns
+        -------
+        str
+            "s" 表示秒，"ms" 表示毫秒
+        """
+        if timestamps.empty:
+            return "s"
+
+        # 取第一个非空值
+        sample = timestamps.dropna().iloc[0] if not timestamps.dropna().empty else 0
+
+        # 如果时间戳大于 1e12，认为是毫秒 (2001年后的毫秒时间戳)
+        # 秒级时间戳在 2033 年前不会超过 2e9
+        if sample > 1e12:
+            return "ms"
+        else:
+            return "s"
 
     def to_qlib_provider_format(
         self,
@@ -592,11 +642,28 @@ class DataBridge:
 
 ### 5.4 signal_bridge.py
 
+> **模块定位说明**:
+>
+> `SignalBridge` 在当前 MVP 版本的 `QlibAlphaStrategy` 中**暂未直接使用**。
+>
+> 当前策略使用 `DirectionalStrategyBase` 的内置机制：
+> - `get_signal()` 返回 1/-1/0 方向信号
+> - `DirectionalStrategyBase` 自动通过 `PositionExecutor` 执行订单
+>
+> `SignalBridge` 的设计目的是为**未来扩展**准备：
+> - 多品种投资组合管理（同时管理 BTC/ETH/SOL 等）
+> - 权重调仓（根据预测分数调整持仓比例）
+> - 自定义订单执行逻辑（限价单、分批建仓等）
+>
+> 如果需要使用 `SignalBridge`，可以在自定义策略中直接调用其方法。
+
 **文件路径**: `hummingbot/hummingbot/data_feed/qlib_bridge/signal_bridge.py`
 
 ```python
 """
 SignalBridge - Qlib 交易信号转换为 Hummingbot 订单
+
+【当前版本未使用，为未来多品种投资组合扩展预留】
 
 Qlib 策略输出格式:
     {
@@ -695,24 +762,38 @@ class SignalBridge:
         instrument = signal.get("instrument", "")
         weight = Decimal(str(signal.get("weight", 0)))
 
-        # 计算目标金额 (报价币，如 USDT)
-        target_quote_amount = available_balance * weight
-
         # 将当前持仓转换为报价币价值
         # current_position 是基础币数量 (如 BTC)
         # current_position_quote 是等值报价币 (如 USDT)
         current_position_quote = current_position * current_price
 
-        # 计算需要交易的报价币金额
-        if direction > 0:  # 买入
-            trade_quote_amount = target_quote_amount - current_position_quote
+        # 根据信号方向计算目标仓位
+        # direction=1 (看涨): 建仓到 weight 比例
+        # direction=-1 (看跌): 清仓（对于现货交易，不能做空）
+        if direction > 0:
+            target_quote_amount = available_balance * weight
+        else:
+            # 看跌时目标仓位为 0（现货无法做空，只能清仓）
+            target_quote_amount = Decimal("0")
+
+        # 计算仓位变化量 (delta)
+        # delta > 0: 需要买入增加仓位
+        # delta < 0: 需要卖出减少仓位
+        delta_quote = target_quote_amount - current_position_quote
+
+        # 根据 delta 方向决定交易类型
+        if delta_quote > 0:
             trade_type = TradeType.BUY
-        else:  # 卖出
-            trade_quote_amount = current_position_quote - target_quote_amount
+            trade_quote_amount = delta_quote
+        elif delta_quote < 0:
             trade_type = TradeType.SELL
+            trade_quote_amount = abs(delta_quote)
+        else:
+            # 无需交易
+            return None
 
         # 转换为基础币数量 (Hummingbot 下单使用基础币数量)
-        trade_base_amount = abs(trade_quote_amount) / current_price
+        trade_base_amount = trade_quote_amount / current_price
 
         # 检查最小下单数量
         if trade_base_amount < self.min_order_amount:
@@ -1165,6 +1246,7 @@ from pathlib import Path
 from decimal import Decimal
 from typing import Dict, List, Optional, Set
 
+import numpy as np
 import pandas as pd
 import qlib
 from qlib.constant import REG_CRYPTO
@@ -1345,9 +1427,23 @@ class QlibAlphaStrategy(DirectionalStrategyBase):
 
     def _compute_features(self, qlib_df: pd.DataFrame) -> Optional[pd.DataFrame]:
         """
-        计算 Alpha158 因子
+        计算 Alpha158 因子 (简化版，用于实时推理)
 
-        使用简化版因子计算 (OHLCV 基础因子)
+        重要说明：
+        1. 此函数计算的因子必须与训练时使用的因子完全一致
+        2. 当前实现是 Alpha158 的简化版本（约 60 个因子）
+        3. 如果训练使用完整 Alpha158，推理时也应使用完整版本
+        4. 生产环境建议：直接使用 Qlib Alpha158 Handler 确保一致性
+
+        简化版因子列表：
+        - KBAR 类：KMID, KLEN, KMID2, KUP, KUP2, KLOW, KLOW2, KSFT, KSFT2
+        - ROC 类：ROC5, ROC10, ROC20, ROC30, ROC60
+        - MA 类：MA5, MA10, MA20, MA30, MA60
+        - STD 类：STD5, STD10, STD20, STD30, STD60
+        - MAX/MIN 类：MAX5-60, MIN5-60
+        - QTLU/QTLD 类：QTLU5-60, QTLD5-60
+        - RSV 类：RSV5-60
+        - CORR 类：CORR5-60, CORD5-60
         """
         try:
             df = qlib_df.copy()
@@ -1542,6 +1638,70 @@ def start(self) -> QlibAlphaStrategy:
 
 ---
 
+### 6.6 策略注册
+
+Hummingbot 需要知道新策略的存在才能在 `create` 命令中显示。需要进行以下注册：
+
+**Step 1**: 修改 `hummingbot/hummingbot/client/command/create_command.py`
+
+在策略列表中添加 `qlib_alpha`:
+
+```python
+# 找到策略注册部分（约第 20-50 行）
+# 在 STRATEGIES 列表中添加:
+STRATEGIES = [
+    # ... existing strategies ...
+    "qlib_alpha",  # 新增：Qlib Alpha 策略
+]
+```
+
+**Step 2**: 修改 `hummingbot/hummingbot/strategy/__init__.py`
+
+导出策略模块：
+
+```python
+# 在文件末尾添加:
+from hummingbot.strategy.qlib_alpha import QlibAlphaStrategy, QlibAlphaConfig
+
+__all__.extend([
+    "QlibAlphaStrategy",
+    "QlibAlphaConfig",
+])
+```
+
+**Step 3**: 创建策略配置映射 `hummingbot/hummingbot/client/config/strategy/qlib_alpha_config_map.py`
+
+```python
+"""
+Qlib Alpha 策略配置映射
+
+此文件用于 Hummingbot CLI 的 create 命令交互式配置。
+"""
+
+from hummingbot.strategy.qlib_alpha.qlib_alpha_config import QlibAlphaConfig
+
+# 使用 Pydantic config 作为 config_map
+qlib_alpha_config_map = QlibAlphaConfig
+```
+
+**Step 4**: 在 `hummingbot/hummingbot/client/config/strategy/__init__.py` 中注册
+
+```python
+# 添加导入
+from hummingbot.client.config.strategy.qlib_alpha_config_map import qlib_alpha_config_map
+
+# 在 STRATEGY_CONFIG_MAP 字典中添加
+STRATEGY_CONFIG_MAP = {
+    # ... existing strategies ...
+    "qlib_alpha": qlib_alpha_config_map,
+}
+```
+
+> **注意**: 具体的注册方式可能因 Hummingbot 版本不同而有所差异。
+> 建议参考现有策略（如 `directional_strategy_base`）的注册方式。
+
+---
+
 ## 7. 模型训练
 
 ### 7.1 训练脚本
@@ -1601,16 +1761,21 @@ def train_model(
     )
 
     # 创建数据处理器 (Alpha158 因子)
+    # 重要：训练时的 freq 必须与实盘 prediction_interval 一致！
+    # 默认使用 1h，与 qlib_alpha.py 中的 _compute_features() 保持一致
     print("Creating data handler with Alpha158 factors...")
     handler = Alpha158(
         instruments=instruments,
         start_time=train_start,
         end_time=valid_end,
-        freq="day",
+        freq="1h",  # 必须与实盘 prediction_interval 一致
         infer_processors=[],
         learn_processors=[
             {"class": "DropnaLabel"},
-            {"class": "CSRankNorm", "kwargs": {"fields_group": "label"}},
+            # 注意：CSRankNorm 需要多个品种才能正常工作
+            # 如果只有 2 个品种，可以删除或改用 Robust 标准化
+            # {"class": "CSRankNorm", "kwargs": {"fields_group": "label"}},
+            {"class": "RobustZScoreNorm", "kwargs": {"fields_group": "label", "clip_outlier": True}},
         ],
     )
 
@@ -2095,13 +2260,18 @@ def verify():
     class MockConnector:
         pass
     signal_bridge = SignalBridge(MockConnector())
+    # 注意：必须传入 current_price 用于单位转换
     order = signal_bridge.signal_to_order(
         signal=signal,
         available_balance=Decimal("10000"),
         current_position=Decimal("0"),
+        current_price=Decimal("42000"),  # 当前 BTC 价格
     )
     assert order is not None, "Order is None"
     assert order["trading_pair"] == "BTC-USDT", f"Wrong trading pair: {order['trading_pair']}"
+    # 验证订单金额: 10000 * 0.1 / 42000 ≈ 0.0238 BTC
+    expected_amount = Decimal("10000") * Decimal("0.1") / Decimal("42000")
+    assert abs(order["amount"] - expected_amount) < Decimal("0.0001"), f"Wrong amount: {order['amount']}"
     print("   ✓ Signal conversion successful")
 
     print("\n✓ All verifications passed!")
@@ -2218,8 +2388,19 @@ pydantic >= 2.0.0
 
 ---
 
-> **版本**: v5.1.0 (2026-01-02)
+> **版本**: v5.2.0 (2026-01-02)
 > **状态**: 可直接运行的完整方案 (含策略层)
+>
+> **v5.2.0 修复内容**:
+> - [B1] 统一训练与实盘特征/频率：train_model.py 改用 `freq="1h"` + `RobustZScoreNorm`
+> - [B2] 修复时间戳单位：添加 `_detect_timestamp_unit()` 自动检测 s/ms
+> - [B3] 修复 SignalBridge 买卖方向：基于 delta 而非 direction 决定 trade_type
+> - [B4] 修复 verify_integration.py：添加 `current_price` 参数
+> - [C1] 添加策略注册步骤：新增 6.6 节说明如何在 Hummingbot 中注册策略
+> - [C2] 明确 SignalBridge 定位：说明当前未使用，为未来多品种扩展预留
+> - [C4] 明确 CryptoCalendarProvider 定位：说明为可选备用方案
+> - 添加 numpy 导入到 qlib_alpha.py
+> - 增强 _compute_features() 文档说明训练/推理一致性
 >
 > **v5.1.0 修复内容**:
 > - 修复 `_compute_features()` 中 `max/min` 改为 `np.maximum/np.minimum`
