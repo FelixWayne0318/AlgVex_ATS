@@ -1,11 +1,11 @@
 # AlgVex 核心方案 (P0 - MVP)
 
-> **版本**: v6.2.0 (2026-01-02)
+> **版本**: v7.0.0 (2026-01-02)
 > **状态**: 可直接运行的完整方案
 
 > **Qlib + Hummingbot 融合的加密货币现货量化交易平台**
 >
-> 本方案基于两个框架的原生扩展机制，**零源码修改**，仅新建必要脚本。
+> 混合方案：Qlib 添加加密货币原生支持，Hummingbot 使用 scripts/ 机制。
 
 ---
 
@@ -13,12 +13,13 @@
 
 - [1. 方案概述](#1-方案概述)
 - [2. 文件清单](#2-文件清单)
-- [3. 数据准备](#3-数据准备)
-- [4. 模型训练](#4-模型训练)
-- [5. 策略脚本](#5-策略脚本)
-- [6. 配置文件](#6-配置文件)
-- [7. 启动与运行](#7-启动与运行)
-- [8. 验收标准](#8-验收标准)
+- [3. Qlib 修改](#3-qlib-修改)
+- [4. 数据准备](#4-数据准备)
+- [5. 模型训练](#5-模型训练)
+- [6. 策略脚本](#6-策略脚本)
+- [7. 配置文件](#7-配置文件)
+- [8. 启动与运行](#8-启动与运行)
+- [9. 验收标准](#9-验收标准)
 
 ---
 
@@ -31,21 +32,21 @@
 │                      核心原则                                │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│  1. 零源码修改                                               │
-│     - Qlib: 使用 qlib.init() 运行时配置                     │
-│     - Hummingbot: 使用 scripts/ 脚本策略机制                │
+│  1. 混合修改策略                                             │
+│     - Qlib: 修改源码，添加 REG_CRYPTO 区域支持              │
+│     - Hummingbot: 零修改，使用 scripts/ 脚本策略机制        │
 │                                                             │
-│  2. 复用现有机制                                             │
-│     - Qlib: Provider 机制、YAML 配置加载                    │
-│     - Hummingbot: ScriptStrategyBase、原生下单 API          │
+│  2. 原生支持优于 Workaround                                  │
+│     - Qlib 原生支持加密货币，无需运行时覆盖配置             │
+│     - 代码更清晰，可维护性更高                              │
 │                                                             │
 │  3. 桥接逻辑内联                                             │
 │     - 数据转换: 策略脚本私有方法                             │
 │     - 信号执行: 直接调用 self.buy()/self.sell()             │
 │                                                             │
-│  4. 升级兼容                                                 │
-│     - Qlib 升级: 直接升级，无需合并                          │
-│     - Hummingbot 升级: 保留 scripts/ 目录即可               │
+│  4. 可贡献上游                                               │
+│     - Qlib 修改可提交 PR 到 microsoft/qlib                  │
+│     - 让更多人受益                                          │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -59,11 +60,11 @@
 │                                                             │
 │  ┌─────────────┐                      ┌─────────────────┐  │
 │  │    Qlib     │                      │   Hummingbot    │  │
-│  │  (不修改)   │                      │    (不修改)     │  │
+│  │  (修改2文件)│                      │    (不修改)     │  │
 │  │             │                      │                 │  │
-│  │ - LGBModel  │◀────────────────────▶│ - Binance API   │  │
-│  │ - Alpha158  │    scripts/          │ - K线数据       │  │
-│  │ - 因子计算  │    qlib_alpha_       │ - 订单执行      │  │
+│  │ + REG_CRYPTO│◀────────────────────▶│ - Binance API   │  │
+│  │ - LGBModel  │    scripts/          │ - K线数据       │  │
+│  │ - Alpha158  │    qlib_alpha_       │ - 订单执行      │  │
 │  │             │    strategy.py       │ - 风控管理      │  │
 │  └─────────────┘         │            └─────────────────┘  │
 │                          │                                  │
@@ -80,23 +81,26 @@
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 1.3 代码量统计
+### 1.3 修改统计
 
-| 文件 | 用途 | 代码量 |
-|------|------|--------|
-| `scripts/prepare_crypto_data.py` | 数据准备 | ~120 行 |
-| `scripts/train_model.py` | 模型训练 | ~100 行 |
-| `scripts/qlib_alpha_strategy.py` | 策略脚本 | ~250 行 |
-| `conf/scripts/qlib_alpha.yml` | 配置文件 | ~30 行 |
-| **总计** | - | **~500 行** |
-
-**对比 v5.x**: 从 14 个文件 ~970 行 → 4 个文件 ~500 行
+| 组件 | 修改类型 | 文件数 | 说明 |
+|------|----------|--------|------|
+| **Qlib** | 修改源码 | 2 | 添加 REG_CRYPTO 区域 |
+| **Hummingbot** | 零修改 | 0 | 使用 scripts/ 机制 |
+| **新建脚本** | 新建 | 4 | 数据/训练/策略/配置 |
 
 ---
 
 ## 2. 文件清单
 
-### 2.1 完整文件清单
+### 2.1 Qlib 修改文件
+
+| 序号 | 文件路径 | 修改类型 | 说明 |
+|------|----------|----------|------|
+| 1 | `qlib/qlib/constant.py` | 修改 | 添加 `REG_CRYPTO` 常量 |
+| 2 | `qlib/qlib/config.py` | 修改 | 添加加密货币区域配置 |
+
+### 2.2 新建文件
 
 | 序号 | 文件路径 | 类型 | 说明 |
 |------|----------|------|------|
@@ -105,18 +109,99 @@
 | 3 | `scripts/qlib_alpha_strategy.py` | 新建 | 策略主脚本 |
 | 4 | `conf/scripts/qlib_alpha.yml` | 新建 | 策略配置 |
 
-### 2.2 Qlib / Hummingbot 修改
+### 2.3 Hummingbot
 
 | 框架 | 修改内容 |
 |------|---------|
-| **Qlib** | 无修改，使用 `qlib.init()` 运行时配置 |
 | **Hummingbot** | 无修改，使用 `scripts/` 脚本策略机制 |
 
 ---
 
-## 3. 数据准备
+## 3. Qlib 修改
 
-### 3.1 脚本代码
+### 3.1 修改 constant.py
+
+**文件路径**: `qlib/qlib/constant.py`
+
+**修改内容**: 添加 `REG_CRYPTO` 常量
+
+```python
+# 在文件末尾添加
+
+# Crypto region (24/7 trading, no price limits)
+REG_CRYPTO = "crypto"
+```
+
+**完整 diff**:
+
+```diff
+--- a/qlib/qlib/constant.py
++++ b/qlib/qlib/constant.py
+@@ -3,3 +3,6 @@
+ REG_CN = "cn"
+ REG_US = "us"
+ REG_TW = "tw"
++
++# Crypto region (24/7 trading, no price limits)
++REG_CRYPTO = "crypto"
+```
+
+### 3.2 修改 config.py
+
+**文件路径**: `qlib/qlib/config.py`
+
+**修改内容**: 添加加密货币区域配置
+
+**修改 1**: 导入 `REG_CRYPTO`
+
+```diff
+--- a/qlib/qlib/config.py
++++ b/qlib/qlib/config.py
+@@ -22,7 +22,7 @@ from typing import Callable, Optional, Union
+ from typing import TYPE_CHECKING
+
+-from qlib.constant import REG_CN, REG_US, REG_TW
++from qlib.constant import REG_CN, REG_US, REG_TW, REG_CRYPTO
+```
+
+**修改 2**: 添加 `_default_region_config` 中的加密货币配置
+
+```diff
+@@ -295,6 +295,12 @@ _default_region_config = {
+         "limit_threshold": None,
+         "deal_price": "close",
+     },
++    REG_CRYPTO: {
++        "trade_unit": 0.00001,      # 加密货币最小交易单位
++        "limit_threshold": None,    # 无涨跌停限制
++        "deal_price": "close",
++        "time_per_step": 60,        # 分钟级数据
++    },
+ }
+```
+
+### 3.3 验证修改
+
+```python
+# 验证 Qlib 加密货币支持
+import qlib
+from qlib.constant import REG_CRYPTO
+from qlib.config import C
+
+# 使用加密货币区域初始化
+qlib.init(provider_uri="~/.qlib/qlib_data/crypto_data", region=REG_CRYPTO)
+
+# 验证配置
+print(f"trade_unit: {C['trade_unit']}")        # 0.00001
+print(f"limit_threshold: {C['limit_threshold']}")  # None
+print(f"region: {C['region']}")                # crypto
+```
+
+---
+
+## 4. 数据准备
+
+### 4.1 脚本代码
 
 **文件路径**: `scripts/prepare_crypto_data.py`
 
@@ -407,7 +492,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-### 3.2 数据目录结构
+### 4.2 数据目录结构
 
 ```
 ~/.qlib/qlib_data/crypto_data/
@@ -429,9 +514,9 @@ if __name__ == "__main__":
 
 ---
 
-## 4. 模型训练
+## 5. 模型训练
 
-### 4.1 脚本代码
+### 5.1 脚本代码
 
 **文件路径**: `scripts/train_model.py`
 
@@ -454,26 +539,10 @@ import argparse
 from pathlib import Path
 
 import qlib
+from qlib.constant import REG_CRYPTO
 from qlib.contrib.model.gbdt import LGBModel
 from qlib.contrib.data.handler import Alpha158
 from qlib.data.dataset import DatasetH
-from qlib.config import C
-
-
-def init_qlib_for_crypto(data_path: str):
-    """
-    初始化 Qlib (加密货币配置)
-
-    使用运行时配置，无需修改 Qlib 源码
-    """
-    data_path = Path(data_path).expanduser().resolve()
-
-    qlib.init(provider_uri=str(data_path))
-
-    # 运行时修改交易参数
-    C["trade_unit"] = 0.00001      # 加密货币最小交易单位
-    C["limit_threshold"] = None    # 无涨跌停限制
-    C["deal_price"] = "close"
 
 
 def train_model(
@@ -489,9 +558,10 @@ def train_model(
     """
     训练 LightGBM 模型
     """
-    # 初始化 Qlib
-    print("Initializing Qlib...")
-    init_qlib_for_crypto(qlib_data_path)
+    # 初始化 Qlib (使用 REG_CRYPTO 区域)
+    print("Initializing Qlib with REG_CRYPTO...")
+    data_path = Path(qlib_data_path).expanduser().resolve()
+    qlib.init(provider_uri=str(data_path), region=REG_CRYPTO)
 
     # 创建数据处理器
     # 重要：freq 必须与实盘 prediction_interval 一致！
@@ -586,9 +656,9 @@ if __name__ == "__main__":
 
 ---
 
-## 5. 策略脚本
+## 6. 策略脚本
 
-### 5.1 脚本代码
+### 6.1 脚本代码
 
 **文件路径**: `scripts/qlib_alpha_strategy.py`
 
@@ -598,7 +668,7 @@ Qlib Alpha 策略
 
 基于 Qlib 机器学习模型的加密货币交易策略。
 
-使用 Hummingbot ScriptStrategyBase，无需修改任何源码。
+使用 Hummingbot ScriptStrategyBase，无需修改 Hummingbot 源码。
 
 启动方式:
     hummingbot
@@ -617,7 +687,7 @@ import pandas as pd
 from pydantic import Field
 
 import qlib
-from qlib.config import C
+from qlib.constant import REG_CRYPTO
 
 from hummingbot.client.config.config_data_types import BaseClientModel
 from hummingbot.connector.connector_base import ConnectorBase
@@ -728,17 +798,14 @@ class QlibAlphaStrategy(ScriptStrategyBase):
             self.logger.error(f"Failed to initialize candles feed: {e}")
 
     def _init_qlib(self):
-        """初始化 Qlib (运行时配置，无需改源码)"""
+        """初始化 Qlib (使用 REG_CRYPTO 区域)"""
         try:
             qlib_path = Path(self.config.qlib_data_path).expanduser()
-            qlib.init(provider_uri=str(qlib_path))
-
-            # 运行时修改加密货币参数
-            C["trade_unit"] = 0.00001
-            C["limit_threshold"] = None
+            # 使用 REG_CRYPTO，无需手动覆盖配置
+            qlib.init(provider_uri=str(qlib_path), region=REG_CRYPTO)
 
             self.qlib_initialized = True
-            self.logger.info("Qlib initialized successfully")
+            self.logger.info("Qlib initialized with REG_CRYPTO")
         except Exception as e:
             self.logger.error(f"Failed to initialize Qlib: {e}")
 
@@ -1024,9 +1091,9 @@ class QlibAlphaStrategy(ScriptStrategyBase):
 
 ---
 
-## 6. 配置文件
+## 7. 配置文件
 
-### 6.1 策略配置
+### 7.1 策略配置
 
 **文件路径**: `conf/scripts/qlib_alpha.yml`
 
@@ -1058,14 +1125,17 @@ cooldown_time: 60          # 60秒冷却
 
 ---
 
-## 7. 启动与运行
+## 8. 启动与运行
 
-### 7.1 完整运行流程
+### 8.1 完整运行流程
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      完整运行流程                            │
 ├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Step 0: 修改 Qlib 源码 (仅首次)                            │
+│  - 按照第 3 节修改 constant.py 和 config.py                 │
 │                                                             │
 │  Step 1: 准备数据                                           │
 │  $ python scripts/prepare_crypto_data.py \                 │
@@ -1091,7 +1161,7 @@ cooldown_time: 60          # 60秒冷却
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 7.2 命令参考
+### 8.2 命令参考
 
 ```bash
 # 数据准备 (可选参数)
@@ -1120,7 +1190,7 @@ cd hummingbot
 >>> start --script qlib_alpha_strategy.py --conf conf/scripts/qlib_alpha.yml
 ```
 
-### 7.3 Paper Trading
+### 8.3 Paper Trading
 
 ```bash
 # 使用 Binance Testnet
@@ -1130,35 +1200,41 @@ cd hummingbot
 
 ---
 
-## 8. 验收标准
+## 9. 验收标准
 
-### 8.1 验收清单
+### 9.1 验收清单
 
 | 序号 | 验收项 | 验收方法 | 通过标准 |
 |------|--------|----------|----------|
-| 1 | 数据准备 | 运行 prepare_crypto_data.py | 生成 Qlib 格式数据 |
-| 2 | 模型训练 | 运行 train_model.py | 模型文件生成 |
-| 3 | Qlib 初始化 | 策略启动 | 无报错 |
-| 4 | K 线获取 | 策略运行 | 获取足够数据 |
-| 5 | 特征计算 | 策略运行 | 特征矩阵非空 |
-| 6 | 信号生成 | 策略运行 | 返回 -1/0/1 |
-| 7 | 订单执行 | 策略运行 | 订单成功 |
-| 8 | 三重屏障 | 触发条件 | 自动平仓 |
-| 9 | Paper Trading | 模拟交易 24h | 无异常 |
+| 1 | Qlib 修改 | 导入 REG_CRYPTO | 无报错 |
+| 2 | 数据准备 | 运行 prepare_crypto_data.py | 生成 Qlib 格式数据 |
+| 3 | 模型训练 | 运行 train_model.py | 模型文件生成 |
+| 4 | Qlib 初始化 | 策略启动 | region=crypto |
+| 5 | K 线获取 | 策略运行 | 获取足够数据 |
+| 6 | 特征计算 | 策略运行 | 特征矩阵非空 |
+| 7 | 信号生成 | 策略运行 | 返回 -1/0/1 |
+| 8 | 订单执行 | 策略运行 | 订单成功 |
+| 9 | 三重屏障 | 触发条件 | 自动平仓 |
+| 10 | Paper Trading | 模拟交易 24h | 无异常 |
 
-### 8.2 验证脚本
+### 9.2 验证脚本
 
 ```python
 # scripts/verify_integration.py
 
 def verify():
     import qlib
+    from qlib.constant import REG_CRYPTO
+    from qlib.config import C
     from pathlib import Path
 
-    # 1. 验证 Qlib 初始化 (无需改源码)
-    print("1. Testing Qlib init...")
-    qlib.init(provider_uri=str(Path("~/.qlib/qlib_data/crypto_data").expanduser()))
-    print("   ✓ Qlib initialized")
+    # 1. 验证 Qlib REG_CRYPTO
+    print("1. Testing Qlib REG_CRYPTO...")
+    qlib.init(provider_uri=str(Path("~/.qlib/qlib_data/crypto_data").expanduser()), region=REG_CRYPTO)
+    assert C["region"] == "crypto", f"Expected crypto, got {C['region']}"
+    assert C["trade_unit"] == 0.00001, f"Expected 0.00001, got {C['trade_unit']}"
+    assert C["limit_threshold"] is None, f"Expected None, got {C['limit_threshold']}"
+    print("   ✓ REG_CRYPTO working correctly")
 
     # 2. 验证模型加载
     print("2. Testing model load...")
@@ -1210,7 +1286,7 @@ if __name__ == "__main__":
 ### A. 依赖版本
 
 ```
-qlib >= 0.9.7
+qlib >= 0.9.7 (需修改源码)
 hummingbot >= 2.11.0
 lightgbm >= 4.0.0
 pandas >= 2.0.0
@@ -1223,6 +1299,7 @@ aiohttp >= 3.8.0
 
 | 问题 | 解决方案 |
 |------|----------|
+| REG_CRYPTO 未定义 | 检查 constant.py 修改是否生效 |
 | Qlib 初始化失败 | 检查数据目录路径是否正确 |
 | 模型加载失败 | 先运行 train_model.py |
 | K 线数据不足 | 等待 Hummingbot 收集数据 |
@@ -1230,6 +1307,12 @@ aiohttp >= 3.8.0
 | 订单执行失败 | 检查 API 权限、余额 |
 
 ### C. 变更日志
+
+**v7.0.0** (2026-01-02)
+- 采用混合修改策略：Qlib 修改源码，Hummingbot 零修改
+- Qlib: 添加 REG_CRYPTO 区域配置 (constant.py, config.py)
+- 移除运行时 C 配置覆盖，使用原生 region 支持
+- 代码更清晰，可维护性更高
 
 **v6.2.0** (2026-01-02)
 - 修复 markets 定义：使用 `init_markets` classmethod (参考 simple_pmm.py)
@@ -1252,14 +1335,3 @@ aiohttp >= 3.8.0
 - Hummingbot: 使用 scripts/ 脚本策略机制
 - 桥接逻辑内联到策略脚本
 - 从 14 个文件 ~970 行 → 4 个文件 ~500 行
-
-**v5.2.0** (2026-01-02)
-- 修复训练/推理特征一致性问题
-- 修复时间戳单位检测
-- 修复 SignalBridge 方向逻辑
-- 添加策略注册说明
-
-**v5.1.0** (2026-01-02)
-- 修复 max/min → np.maximum/np.minimum
-- 修复 model.predict() 接口
-- 修复信号阈值逻辑
