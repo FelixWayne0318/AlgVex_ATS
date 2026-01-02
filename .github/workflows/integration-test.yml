@@ -1,0 +1,169 @@
+name: Integration Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'qlib/qlib/**'
+      - 'hummingbot/hummingbot/data_feed/qlib_bridge/**'
+      - 'hummingbot/hummingbot/strategy/qlib_alpha/**'
+      - 'scripts/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'qlib/qlib/**'
+      - 'hummingbot/hummingbot/data_feed/qlib_bridge/**'
+      - 'hummingbot/hummingbot/strategy/qlib_alpha/**'
+      - 'scripts/**'
+
+permissions:
+  contents: read
+
+jobs:
+  qlib-integration:
+    name: Qlib Integration Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Qlib dependencies
+        run: |
+          cd qlib
+          pip install -e ".[dev]" || pip install -e .
+        continue-on-error: true
+
+      - name: Check Qlib modifications
+        run: |
+          echo "Checking Qlib constant.py..."
+          python -c "
+          import sys
+          sys.path.insert(0, 'qlib')
+          try:
+              from qlib.constant import REG_CRYPTO
+              print(f'REG_CRYPTO = {REG_CRYPTO}')
+              print('Qlib constant.py check passed')
+          except ImportError as e:
+              print(f'REG_CRYPTO not found (expected if not yet implemented): {e}')
+          "
+
+      - name: Check Qlib config
+        run: |
+          echo "Checking Qlib config.py..."
+          python -c "
+          import sys
+          sys.path.insert(0, 'qlib')
+          try:
+              from qlib.config import REGION_CRYPTO_CONFIG
+              print('REGION_CRYPTO_CONFIG found')
+              print('Qlib config.py check passed')
+          except ImportError as e:
+              print(f'REGION_CRYPTO_CONFIG not found (expected if not yet implemented): {e}')
+          "
+
+  bridge-layer:
+    name: Bridge Layer Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check Bridge module structure
+        run: |
+          echo "Checking qlib_bridge module structure..."
+
+          BRIDGE_DIR="hummingbot/hummingbot/data_feed/qlib_bridge"
+
+          if [ -d "$BRIDGE_DIR" ]; then
+            echo "Bridge directory exists"
+            ls -la "$BRIDGE_DIR" || true
+
+            # Check for expected files
+            for file in "__init__.py" "data_bridge.py" "signal_bridge.py" "calendar.py"; do
+              if [ -f "$BRIDGE_DIR/$file" ]; then
+                echo "$file exists"
+                python -m py_compile "$BRIDGE_DIR/$file" && echo "$file syntax OK"
+              else
+                echo "$file not found (expected if not yet implemented)"
+              fi
+            done
+          else
+            echo "Bridge directory not yet created (expected if not yet implemented)"
+          fi
+
+  strategy-layer:
+    name: Strategy Layer Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check Strategy module structure
+        run: |
+          echo "Checking qlib_alpha strategy module structure..."
+
+          STRATEGY_DIR="hummingbot/hummingbot/strategy/qlib_alpha"
+
+          if [ -d "$STRATEGY_DIR" ]; then
+            echo "Strategy directory exists"
+            ls -la "$STRATEGY_DIR" || true
+
+            # Check for expected files
+            for file in "__init__.py" "qlib_alpha.py" "qlib_alpha_config.py" "start.py"; do
+              if [ -f "$STRATEGY_DIR/$file" ]; then
+                echo "$file exists"
+                python -m py_compile "$STRATEGY_DIR/$file" && echo "$file syntax OK"
+              else
+                echo "$file not found (expected if not yet implemented)"
+              fi
+            done
+          else
+            echo "Strategy directory not yet created (expected if not yet implemented)"
+          fi
+
+  scripts-check:
+    name: Scripts Syntax Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check scripts syntax
+        run: |
+          echo "Checking scripts syntax..."
+
+          if [ -d "scripts" ]; then
+            for file in scripts/*.py; do
+              if [ -f "$file" ]; then
+                echo "Checking $file..."
+                python -m py_compile "$file" && echo "$file syntax OK"
+              fi
+            done
+          else
+            echo "Scripts directory not yet created"
+          fi

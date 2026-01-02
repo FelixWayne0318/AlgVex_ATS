@@ -1,0 +1,60 @@
+name: Question
+description: Ask a question about AlgVex ATS usage
+title: "[Question]: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Question
+
+        Before asking, please check:
+        - [CORE_PLAN.md](../../docs/CORE_PLAN.md) for implementation details
+        - [Qlib Documentation](https://qlib.readthedocs.io/)
+        - [Hummingbot Documentation](https://hummingbot.org/docs/)
+
+  - type: dropdown
+    id: topic
+    attributes:
+      label: Topic
+      description: What is your question about?
+      options:
+        - Installation & Setup
+        - Data Preparation
+        - Model Training
+        - Strategy Configuration
+        - API Integration (Binance)
+        - Risk Management
+        - Performance Tuning
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your Question
+      description: Please describe your question in detail
+      placeholder: What would you like to know?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Provide any relevant context or what you've already tried
+      placeholder: |
+        - What I'm trying to achieve:
+        - What I've tried:
+        - Where I'm stuck:
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment (if relevant)
+      value: |
+        - OS:
+        - Python version:
+        - Qlib version:
+        - Hummingbot version:

@@ -1,0 +1,29 @@
+# AlgVex ATS Code Owners
+# These owners will be requested for review when someone opens a pull request.
+# Learn more: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for everything
+* @FelixWayne0318
+
+# Core AlgVex module
+/algvex/ @FelixWayne0318
+
+# Documentation
+/docs/ @FelixWayne0318
+
+# Qlib modifications
+/qlib/qlib/constant.py @FelixWayne0318
+/qlib/qlib/config.py @FelixWayne0318
+/qlib/qlib/data/ @FelixWayne0318
+
+# Hummingbot - Bridge layer
+/hummingbot/hummingbot/data_feed/qlib_bridge/ @FelixWayne0318
+
+# Hummingbot - Qlib Alpha Strategy
+/hummingbot/hummingbot/strategy/qlib_alpha/ @FelixWayne0318
+
+# Scripts
+/scripts/ @FelixWayne0318
+
+# GitHub Actions and CI/CD
+/.github/ @FelixWayne0318

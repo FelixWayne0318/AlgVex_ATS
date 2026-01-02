@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discord Community
+    url: https://discord.gg/hummingbot
+    about: Join the Hummingbot community for discussions and support
+  - name: Qlib Documentation
+    url: https://qlib.readthedocs.io/
+    about: Check Qlib official documentation for model-related questions
