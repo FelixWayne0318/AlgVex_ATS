@@ -1,6 +1,6 @@
 # AlgVex 核心方案 (P0 - MVP)
 
-> **版本**: v8.0.1 (2026-01-02)
+> **版本**: v8.0.2 (2026-01-02)
 > **状态**: 可直接运行的完整方案
 
 > **Qlib + Hummingbot 融合的加密货币现货量化交易平台**
@@ -580,13 +580,19 @@ def train_model(
 
     # 创建数据处理器
     # 重要：freq 必须与实盘 prediction_interval 一致！
+    #
+    # Alpha158 默认 Label 定义 (Qlib 官方):
+    #   label = Ref($close, -2) / Ref($close, -1) - 1
+    #   即：预测 t+2 时刻相对于 t+1 时刻的收益率
+    #   这意味着模型学习的是"下下个周期的收益率"
+    #
     print(f"Creating Alpha158 handler with freq={freq}...")
     handler = Alpha158(
         instruments=instruments,
         start_time=train_start,
         end_time=valid_end,
         freq=freq,
-        infer_processors=[],
+        infer_processors=[],  # 推理时不处理 label
         learn_processors=[
             {"class": "DropnaLabel"},
             # RobustZScoreNorm 适合少量品种 (CSRankNorm 需要多品种)
@@ -1385,6 +1391,11 @@ aiohttp >= 3.8.0
 | Controller 未找到 | 检查 controllers/ 目录和导入路径 |
 
 ### C. 变更日志
+
+**v8.0.2** (2026-01-02)
+- 添加 Alpha158 默认 Label 定义说明 (`Ref($close, -2) / Ref($close, -1) - 1`)
+- 明确 `infer_processors=[]` 用途说明
+- 基于 Qlib 官方文档全面验证
 
 **v8.0.1** (2026-01-02)
 - 添加 `$factor` 字段支持 (Qlib 官方要求的必需字段)
