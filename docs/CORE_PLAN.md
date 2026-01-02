@@ -1,5 +1,8 @@
 # AlgVex 核心方案 (P0 - MVP)
 
+> **版本**: v5.2.0 (2026-01-02)
+> **状态**: 可直接运行的完整方案 (含策略层)
+
 > **Qlib + Hummingbot 融合的加密货币现货量化交易平台**
 >
 > 本文档包含完整的实施方案，精确到文件路径、行号、代码内容。
@@ -2388,27 +2391,30 @@ pydantic >= 2.0.0
 
 ---
 
-> **版本**: v5.2.0 (2026-01-02)
-> **状态**: 可直接运行的完整方案 (含策略层)
->
-> **v5.2.0 修复内容**:
-> - [B1] 统一训练与实盘特征/频率：train_model.py 改用 `freq="1h"` + `RobustZScoreNorm`
-> - [B2] 修复时间戳单位：添加 `_detect_timestamp_unit()` 自动检测 s/ms
-> - [B3] 修复 SignalBridge 买卖方向：基于 delta 而非 direction 决定 trade_type
-> - [B4] 修复 verify_integration.py：添加 `current_price` 参数
-> - [C1] 添加策略注册步骤：新增 6.6 节说明如何在 Hummingbot 中注册策略
-> - [C2] 明确 SignalBridge 定位：说明当前未使用，为未来多品种扩展预留
-> - [C4] 明确 CryptoCalendarProvider 定位：说明为可选备用方案
-> - 添加 numpy 导入到 qlib_alpha.py
-> - 增强 _compute_features() 文档说明训练/推理一致性
->
-> **v5.1.0 修复内容**:
-> - 修复 `_compute_features()` 中 `max/min` 改为 `np.maximum/np.minimum`
-> - 修复 `model.predict()` 接口：使用底层 `self.model.model.predict()`
-> - 修复信号阈值逻辑：从概率阈值改为收益率阈值 (默认 0.005)
-> - 修复 SignalBridge 金额单位：添加 `current_price` 参数进行单位转换
-> - 修复日历/数据存储：支持多频率，添加 `freq` 参数
-> - 修复数据准备脚本：使用 `get_historical_candles` 获取完整历史
-> - 修复 start.py：添加 `_get_config_value()` 处理 ConfigVar 类型
-> - 修复文档表述：明确 Hummingbot 需新增模块而非完全不修改
-> - 添加 `get_crypto_config()` 辅助函数简化 Qlib 初始化
+### E. 变更日志
+
+**v5.2.0** (2026-01-02)
+- [B1] 统一训练与实盘特征/频率：train_model.py 改用 `freq="1h"` + `RobustZScoreNorm`
+- [B2] 修复时间戳单位：添加 `_detect_timestamp_unit()` 自动检测 s/ms
+- [B3] 修复 SignalBridge 买卖方向：基于 delta 而非 direction 决定 trade_type
+- [B4] 修复 verify_integration.py：添加 `current_price` 参数
+- [C1] 添加策略注册步骤：新增 6.6 节说明如何在 Hummingbot 中注册策略
+- [C2] 明确 SignalBridge 定位：说明当前未使用，为未来多品种扩展预留
+- [C4] 明确 CryptoCalendarProvider 定位：说明为可选备用方案
+- 添加 numpy 导入到 qlib_alpha.py
+- 增强 _compute_features() 文档说明训练/推理一致性
+
+**v5.1.0** (2026-01-02)
+- 修复 `_compute_features()` 中 `max/min` 改为 `np.maximum/np.minimum`
+- 修复 `model.predict()` 接口：使用底层 `self.model.model.predict()`
+- 修复信号阈值逻辑：从概率阈值改为收益率阈值 (默认 0.005)
+- 修复 SignalBridge 金额单位：添加 `current_price` 参数进行单位转换
+- 修复日历/数据存储：支持多频率，添加 `freq` 参数
+- 修复数据准备脚本：使用 `get_historical_candles` 获取完整历史
+- 修复 start.py：添加 `_get_config_value()` 处理 ConfigVar 类型
+- 修复文档表述：明确 Hummingbot 需新增模块而非完全不修改
+- 添加 `get_crypto_config()` 辅助函数简化 Qlib 初始化
+
+**v5.0.0** (初始版本)
+- 完整的 Qlib + Hummingbot 融合方案
+- 包含桥接层、策略层、训练脚本、数据准备脚本
