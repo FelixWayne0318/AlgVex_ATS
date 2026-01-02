@@ -15,10 +15,10 @@
 
 - [1. 方案概述](#1-方案概述)
 - [2. 文件清单](#2-文件清单)
-- [3. Qlib 修改](#3-qlib-修改)
+- [3. Qlib 配置](#3-qlib-配置)
 - [4. 数据准备](#4-数据准备)
 - [5. 模型训练](#5-模型训练)
-- [6. Qlib 回测](#6-qlib-回测)
+- [6. 离线回测](#6-离线回测)
 - [7. 策略脚本](#7-策略脚本)
 - [8. 配置文件](#8-配置文件)
 - [9. 启动与运行](#9-启动与运行)
@@ -99,7 +99,7 @@
 |------|----------|--------|------|
 | **Qlib** | 运行时配置 | 0 | 使用 `qlib.config.C` 覆盖，`region="us"` |
 | **Hummingbot** | 零修改 | 0 | 使用 Strategy V2 框架 |
-| **新建脚本** | 新建 | 8 | 特征/数据/训练/回测/策略/控制器/配置×2 |
+| **新建脚本** | 新建 | 9 | 特征/数据/训练/回测/策略/控制器/验证/配置×2 |
 
 ---
 
@@ -1459,8 +1459,8 @@ class QlibAlphaControllerConfig(ControllerConfigBase):
     trading_pair: str = Field(default="BTC-USDT")
     order_amount_usd: Decimal = Field(default=Decimal("100"))
 
-    # 模型配置 (v9.0.0: 改为目录，包含 model + normalizer)
-    model_dir: str = Field(default="~/.qlib/models")
+    # 模型配置 (v10.0.0: 目录结构，包含 model.pkl + normalizer.pkl + metadata.json)
+    model_dir: str = Field(default="~/.algvex/models/qlib_alpha")
 
     # 信号配置
     signal_threshold: Decimal = Field(default=Decimal("0.005"))
@@ -1877,8 +1877,8 @@ connector_name: binance
 trading_pair: BTC-USDT
 order_amount_usd: 100
 
-# 模型配置 (v9.0.0: 改为目录，包含 model + normalizer + feature_columns)
-model_dir: ~/.qlib/models
+# 模型配置 (v10.0.0: 目录结构)
+model_dir: ~/.algvex/models/qlib_alpha
 
 # 信号配置
 signal_threshold: 0.005    # 0.5% 收益率阈值
@@ -1935,30 +1935,32 @@ controllers_config:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                   完整运行流程 (V2)                          │
+│                   完整运行流程 (v10.0.0)                      │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│  Step 0: 修改 Qlib 源码 (仅首次)                            │
-│  - 按照第 3 节修改 constant.py 和 config.py                 │
-│                                                             │
-│  Step 1: 准备数据                                           │
+│  Step 1: 准备数据 (Parquet 格式)                            │
 │  $ python scripts/prepare_crypto_data.py \                 │
 │      --trading-pairs BTC-USDT ETH-USDT \                   │
 │      --interval 1h \                                        │
 │      --start-date 2023-01-01 \                             │
-│      --end-date 2024-12-31                                 │
+│      --end-date 2024-12-31 \                               │
+│      --output-dir ~/.algvex/data                           │
 │                                                             │
 │  Step 2: 训练模型                                           │
 │  $ python scripts/train_model.py \                         │
+│      --data-dir ~/.algvex/data/1h \                        │
+│      --output-dir ~/.algvex/models/qlib_alpha \            │
 │      --instruments btcusdt ethusdt \                       │
-│      --freq 60min    # Qlib 统一使用 60min                 │
+│      --freq 1h                                              │
 │                                                             │
-│  Step 3: Qlib 回测 (模型验证) ← 新增                        │
-│  $ python scripts/backtest_model.py \                      │
+│  Step 3: 离线回测 (与实盘同链路)                            │
+│  $ python scripts/backtest_offline.py \                    │
+│      --data-dir ~/.algvex/data/1h \                        │
+│      --model-dir ~/.algvex/models/qlib_alpha \             │
 │      --instruments btcusdt ethusdt \                       │
 │      --test-start 2024-07-01 \                             │
 │      --test-end 2024-12-31                                 │
-│  - 验证 IC > 0.02, Sharpe > 0.5                            │
+│  - 验证 Sharpe > 0.5, MaxDD < 30%                          │
 │  - 通过后进入下一步                                        │
 │                                                             │
 │  Step 4: 配置 API                                           │
@@ -1976,33 +1978,32 @@ controllers_config:
 ### 9.2 命令参考
 
 ```bash
-# 数据准备 (可选参数)
+# 数据准备 (输出 Parquet 格式)
 python scripts/prepare_crypto_data.py \
     --trading-pairs BTC-USDT ETH-USDT SOL-USDT \
     --interval 1h \
     --start-date 2023-01-01 \
     --end-date 2024-12-31 \
-    --output-dir ~/.qlib/qlib_data/crypto_data
+    --output-dir ~/.algvex/data
 
-# 模型训练 (可选参数)
+# 模型训练
 python scripts/train_model.py \
-    --qlib-data-path ~/.qlib/qlib_data/crypto_data \
-    --output ~/.qlib/models/lgb_model.pkl \
+    --data-dir ~/.algvex/data/1h \
+    --output-dir ~/.algvex/models/qlib_alpha \
     --instruments btcusdt ethusdt \
     --train-start 2023-01-01 \
     --train-end 2024-06-30 \
     --valid-start 2024-07-01 \
     --valid-end 2024-12-31 \
-    --freq 60min    # Qlib 统一使用 60min
+    --freq 1h
 
-# Qlib 回测 (模型验证)
-python scripts/backtest_model.py \
-    --qlib-data-path ~/.qlib/qlib_data/crypto_data \
-    --model-path ~/.qlib/models/lgb_model.pkl \
+# 离线回测 (与实盘同链路)
+python scripts/backtest_offline.py \
+    --data-dir ~/.algvex/data/1h \
+    --model-dir ~/.algvex/models/qlib_alpha \
     --instruments btcusdt ethusdt \
     --test-start 2024-07-01 \
-    --test-end 2024-12-31 \
-    --freq 60min    # Qlib 统一使用 60min
+    --test-end 2024-12-31
 
 # 启动 V2 策略
 cd hummingbot
@@ -2027,15 +2028,15 @@ cd hummingbot
 
 | 序号 | 验收项 | 验收方法 | 通过标准 |
 |------|--------|----------|----------|
-| 1 | Qlib 修改 | 导入 REG_CRYPTO | 无报错 |
-| 2 | 数据准备 | 运行 prepare_crypto_data.py | 生成 Qlib 格式数据 |
-| 3 | 模型训练 | 运行 train_model.py | 模型文件生成 |
-| 4 | **Qlib 回测** | 运行 backtest_model.py | IC > 0.02, Sharpe > 0.5 |
-| 5 | Qlib 初始化 | Controller 启动 | region=crypto |
-| 6 | MarketDataProvider | Controller 运行 | get_candles_df() 返回数据 |
-| 7 | 特征计算 | Controller 运行 | 特征矩阵非空 |
-| 8 | 信号生成 | Controller 运行 | 返回 -1/0/1 |
-| 9 | PositionExecutor | 策略运行 | Executor 创建成功 |
+| 1 | 数据准备 | 运行 prepare_crypto_data.py | ~/.algvex/data/1h/*.parquet 生成 |
+| 2 | 模型训练 | 运行 train_model.py | model.pkl + normalizer.pkl + metadata.json 生成 |
+| 3 | **离线回测** | 运行 backtest_offline.py | Sharpe > 0.5, MaxDD < 30% |
+| 4 | Qlib 初始化 | Controller 启动 | region="us" + C["trade_unit"]=1 |
+| 5 | MarketDataProvider | Controller 运行 | get_candles_df() 返回 >= MIN_BARS 条数据 |
+| 6 | 特征计算 | Controller 运行 | compute_unified_features() 非空 |
+| 7 | Normalizer | Controller 运行 | transform(strict=True) 无异常 |
+| 8 | 信号生成 | Controller 运行 | 使用 iloc[-2] 返回 -1/0/1 |
+| 9 | PositionExecutor | 策略运行 | Decimal 精度 Executor 创建成功 |
 | 10 | 三重屏障 | 触发条件 | Executor 自动关闭 |
 | 11 | Paper Trading | 模拟交易 24h | 无异常 |
 
