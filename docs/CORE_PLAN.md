@@ -1,6 +1,6 @@
 # AlgVex 核心方案 (P0 - MVP)
 
-> **版本**: v10.0.1 (2026-01-03)
+> **版本**: v10.0.2 (2026-01-03)
 > **状态**: 唯一实现方案，可直接运行
 
 > **Qlib + Hummingbot 融合的加密货币现货量化交易平台**
@@ -2581,6 +2581,22 @@ pyarrow >= 14.0.0 (Parquet 支持)
 | 回测与实盘不一致 | 确保使用 iloc[-2] 和 strict=True |
 
 ### C. 变更日志
+
+**v10.0.2** (2026-01-03) - 专家评估修复
+
+- **修复**: `--data-dir` 命令路径错误
+  - `~/.algvex/data/1h` → `~/.algvex/data --freq 1h`
+  - 避免内部再拼接导致 `1h/1h` 路径
+- **修复**: `verify_parquet_data()` 兼容性
+  - 支持 datetime 在列或 index
+  - 添加 index 重复/排序检查
+- **修复**: `unified_features` import 兼容性
+  - 添加 try/except 处理不同运行目录
+- **更新**: 正确表述（全局口径）
+  - "Qlib 官方训练与在线是一致的，但依赖 .bin 机制，不适合实时 DataFrame 架构"
+- **更新**: QLIB_REFERENCE.md 第 10 章
+  - 与 AlgVex v10 口径对齐
+  - 移除 REG_CRYPTO 示例
 
 **v10.0.1** (2026-01-03) - 口径修正
 
