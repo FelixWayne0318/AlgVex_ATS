@@ -71,8 +71,16 @@ git --version
 
 ### Step 3: 克隆项目
 
+**CMD:**
 ```cmd
 cd %USERPROFILE%
+git clone https://github.com/FelixWayne0318/AlgVex_ATS.git
+cd AlgVex_ATS
+```
+
+**PowerShell:**
+```powershell
+cd $env:USERPROFILE
 git clone https://github.com/FelixWayne0318/AlgVex_ATS.git
 cd AlgVex_ATS
 ```
@@ -97,9 +105,16 @@ python -m pip install numpy pandas pyarrow lightgbm scikit-learn plotly jupyter 
 
 ### Step 6: 创建数据目录
 
+**CMD:**
 ```cmd
 mkdir %USERPROFILE%\.algvex\data\1h
 mkdir %USERPROFILE%\.algvex\models\qlib_alpha
+```
+
+**PowerShell:**
+```powershell
+mkdir $env:USERPROFILE\.algvex\data\1h -Force
+mkdir $env:USERPROFILE\.algvex\models\qlib_alpha -Force
 ```
 
 ---
@@ -149,8 +164,15 @@ python scripts/train_model.py --instruments btcusdt ethusdt --train-start 2023-0
 ```
 
 训练完成后检查模型文件:
+
+**CMD:**
 ```cmd
 dir %USERPROFILE%\.algvex\models\qlib_alpha
+```
+
+**PowerShell:**
+```powershell
+dir $env:USERPROFILE\.algvex\models\qlib_alpha
 ```
 
 应该看到:
@@ -167,11 +189,21 @@ metadata.json        - 训练元信息
 
 ### 启动 Jupyter
 
+**CMD:**
 ```cmd
 cd %USERPROFILE%\AlgVex_ATS
 venv\Scripts\activate
 jupyter notebook
 ```
+
+**PowerShell:**
+```powershell
+cd $env:USERPROFILE\AlgVex_ATS
+.\venv\Scripts\Activate.ps1
+jupyter notebook
+```
+
+> **注意**: 如果 Jupyter 显示 "Notebook is not trusted"，点击右上角 **"Trust"** 按钮即可。
 
 ### 打开教程
 
