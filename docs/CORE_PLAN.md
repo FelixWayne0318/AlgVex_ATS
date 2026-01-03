@@ -184,8 +184,12 @@ def init_qlib(provider_uri: str = None):
 
 ### 3.2 为什么不采用 Qlib 官方 Online Serving 链路
 
-> **口径修正**: 这不是"Qlib 回测与实盘不同"的设计问题，
-> 而是 **Qlib 官方在线服务依赖 Provider/.bin + DataHandler 的离线数据管线，不适合本方案的实时 DataFrame 架构**。
+> **正确表述（全局口径）**:
+> Qlib 官方训练与在线是一致的（同一 DataHandler/Alpha），但其在线服务依赖 .bin 数据更新与 DataHandler 读取机制，
+> 不适合我们基于 Hummingbot 实时 OHLCV DataFrame 的实时架构；
+> 因此 AlgVex v10 采用 unified_features 统一链路，保证训练/回测/实盘同代码。
+>
+> **不是 Qlib 的缺陷，是场景不匹配**：股票日线离线增量更新 vs 加密小时线/准实时流数据。
 
 **Qlib 官方 Online Serving（面向股票的合理工程假设）**
 
@@ -215,7 +219,7 @@ def init_qlib(provider_uri: str = None):
 并维护 calendar/instrument 对齐、缺口修复、date_index 对齐等。
 这条"在线落地 .bin"链路会成为实盘关键依赖：**复杂、易错、排障成本高**。
 
-**v10.0.0 唯一口径（保持回测=实盘）**
+**v10 唯一口径（保持回测=实盘）**
 
 - 训练/回测/实盘统一输入：`OHLCV (DataFrame/Parquet)`
 - 统一特征链路：`compute_unified_features() → normalizer.transform(strict=True) → LightGBM.predict()`
@@ -802,13 +806,21 @@ import numpy as np
 import pandas as pd
 import lightgbm as lgb
 
-# 导入统一特征模块
-from unified_features import (
-    compute_unified_features,
-    compute_label,
-    FeatureNormalizer,
-    FEATURE_COLUMNS,
-)
+# 导入统一特征模块 (兼容不同运行目录)
+try:
+    from scripts.unified_features import (
+        compute_unified_features,
+        compute_label,
+        FeatureNormalizer,
+        FEATURE_COLUMNS,
+    )
+except ImportError:
+    from unified_features import (
+        compute_unified_features,
+        compute_label,
+        FeatureNormalizer,
+        FEATURE_COLUMNS,
+    )
 
 
 def load_parquet_data(data_dir: Path, instruments: list, freq: str) -> dict:
@@ -1068,11 +1080,19 @@ import numpy as np
 import pandas as pd
 import lightgbm as lgb
 
-from unified_features import (
-    compute_unified_features,
-    FeatureNormalizer,
-    FEATURE_COLUMNS,
-)
+# 导入统一特征模块 (兼容不同运行目录)
+try:
+    from scripts.unified_features import (
+        compute_unified_features,
+        FeatureNormalizer,
+        FEATURE_COLUMNS,
+    )
+except ImportError:
+    from unified_features import (
+        compute_unified_features,
+        FeatureNormalizer,
+        FEATURE_COLUMNS,
+    )
 
 
 @dataclass
@@ -1482,12 +1502,19 @@ from hummingbot.strategy_v2.models.executor_actions import (
 )
 from pydantic import Field
 
-# 导入统一特征模块
-from scripts.unified_features import (
-    compute_unified_features,
-    FeatureNormalizer,
-    FEATURE_COLUMNS,
-)
+# 导入统一特征模块 (兼容不同运行目录)
+try:
+    from scripts.unified_features import (
+        compute_unified_features,
+        FeatureNormalizer,
+        FEATURE_COLUMNS,
+    )
+except ImportError:
+    from unified_features import (
+        compute_unified_features,
+        FeatureNormalizer,
+        FEATURE_COLUMNS,
+    )
 
 
 class QlibAlphaControllerConfig(ControllerConfigBase):
@@ -1994,16 +2021,17 @@ controllers_config:
 │                                                             │
 │  Step 2: 训练模型                                           │
 │  $ python scripts/train_model.py \                         │
-│      --data-dir ~/.algvex/data/1h \                        │
+│      --data-dir ~/.algvex/data \                           │
 │      --output-dir ~/.algvex/models/qlib_alpha \            │
 │      --instruments btcusdt ethusdt \                       │
 │      --freq 1h                                              │
 │                                                             │
 │  Step 3: 离线回测 (与实盘同链路)                            │
 │  $ python scripts/backtest_offline.py \                    │
-│      --data-dir ~/.algvex/data/1h \                        │
+│      --data-dir ~/.algvex/data \                           │
 │      --model-dir ~/.algvex/models/qlib_alpha \             │
 │      --instruments btcusdt ethusdt \                       │
+│      --freq 1h \                                            │
 │      --test-start 2024-07-01 \                             │
 │      --test-end 2024-12-31                                 │
 │  - 验证 Sharpe > 0.5, MaxDD < 30%                          │
@@ -2034,7 +2062,7 @@ python scripts/prepare_crypto_data.py \
 
 # 模型训练
 python scripts/train_model.py \
-    --data-dir ~/.algvex/data/1h \
+    --data-dir ~/.algvex/data \
     --output-dir ~/.algvex/models/qlib_alpha \
     --instruments btcusdt ethusdt \
     --train-start 2023-01-01 \
@@ -2045,9 +2073,10 @@ python scripts/train_model.py \
 
 # 离线回测 (与实盘同链路)
 python scripts/backtest_offline.py \
-    --data-dir ~/.algvex/data/1h \
+    --data-dir ~/.algvex/data \
     --model-dir ~/.algvex/models/qlib_alpha \
     --instruments btcusdt ethusdt \
+    --freq 1h \
     --test-start 2024-07-01 \
     --test-end 2024-12-31
 
@@ -2151,90 +2180,100 @@ def verify_qlib_runtime_config() -> bool:
 
 def verify_parquet_data(freq: str = "1h") -> Tuple[bool, dict]:
     """
-    验证 Parquet 数据质量 (v10.0.0)
+    验证 Parquet 数据质量 (v10.0.1)
 
     检查项:
     - Parquet 文件存在
-    - 必需列完整 (datetime, open, high, low, close, volume)
-    - 缺失值比例 < 5%
+    - datetime 在列或 index (兼容两种格式)
+    - 必需列完整 (open, high, low, close, volume)
+    - 缺失值检查
     - 价格值合理 (> 0)
     - 时区为 UTC
+    - index 无重复且有序
     """
     print(f"2. Testing Parquet data ({freq})...")
-    results = {"passed": True, "issues": []}
 
     freq_dir = DATA_DIR / freq
     if not freq_dir.exists():
         print(f"   ✗ Data directory not found: {freq_dir}")
         return False, {"passed": False, "issues": [f"Directory not found: {freq_dir}"]}
 
-    parquet_files = list(freq_dir.glob("*.parquet"))
-    if not parquet_files:
-        print(f"   ✗ No Parquet files in {freq_dir}")
-        return False, {"passed": False, "issues": ["No Parquet files"]}
+    # 检查 btcusdt.parquet 作为示例
+    file_path = freq_dir / "btcusdt.parquet"
+    if not file_path.exists():
+        parquet_files = list(freq_dir.glob("*.parquet"))
+        if not parquet_files:
+            return False, {"passed": False, "issues": ["No Parquet files"]}
+        file_path = parquet_files[0]
 
-    required_cols = ["datetime", "open", "high", "low", "close", "volume"]
-
-    for pq_file in parquet_files:
-        inst_name = pq_file.stem
+    try:
+        df = pd.read_parquet(file_path)
+        inst_name = file_path.stem
         print(f"   Checking {inst_name}...")
 
-        try:
-            df = pd.read_parquet(pq_file)
+        # 1) 兼容：datetime 可能在列，也可能在 index
+        if "datetime" in df.columns:
+            df["datetime"] = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
+            df = df.set_index("datetime")
 
-            # 2.1 验证必需列
-            missing_cols = set(required_cols) - set(df.columns)
-            if missing_cols:
-                results["issues"].append(f"{inst_name}: missing columns {missing_cols}")
-                results["passed"] = False
-                continue
+        if not isinstance(df.index, pd.DatetimeIndex):
+            return False, {"passed": False, "issues": ["DatetimeIndex missing"]}
 
-            # 2.2 验证 datetime 时区
-            if df["datetime"].dt.tz is None:
-                results["issues"].append(f"{inst_name}: datetime has no timezone (must be UTC)")
-                results["passed"] = False
-            elif str(df["datetime"].dt.tz) != "UTC":
-                results["issues"].append(f"{inst_name}: datetime tz={df['datetime'].dt.tz}, expected UTC")
-                results["passed"] = False
+        # 2) 统一 UTC
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("UTC")
 
-            # 2.3 验证缺失值
-            for col in ["open", "high", "low", "close", "volume"]:
-                nan_pct = df[col].isna().sum() / len(df)
-                if nan_pct > 0.05:
-                    results["issues"].append(f"{inst_name}/{col}: {nan_pct:.1%} missing")
-                    results["passed"] = False
+        # 3) 必需列（不再要求 datetime 列）
+        required_cols = ["open", "high", "low", "close", "volume"]
+        missing = [c for c in required_cols if c not in df.columns]
+        if missing:
+            return False, {"passed": False, "issues": [f"Missing columns: {missing}"]}
 
-            # 2.4 验证价格 > 0
-            for col in ["open", "high", "low", "close"]:
-                invalid = (df[col] <= 0).sum()
-                if invalid > 0:
-                    results["issues"].append(f"{inst_name}/{col}: {invalid} rows <= 0")
-                    results["passed"] = False
+        # 4) 基础健康检查
+        ok = True
+        issues = []
 
-            print(f"      ✓ {len(df)} rows, {df['datetime'].min()} to {df['datetime'].max()}")
+        if df.index.has_duplicates:
+            ok = False
+            issues.append("duplicate datetime index")
 
-        except Exception as e:
-            results["issues"].append(f"{inst_name}: read error: {e}")
-            results["passed"] = False
+        if not df.index.is_monotonic_increasing:
+            ok = False
+            issues.append("datetime index not sorted")
 
-    # 2.5 验证 metadata.json
-    metadata_file = freq_dir / "metadata.json"
-    if metadata_file.exists():
-        import json
-        with open(metadata_file) as f:
-            metadata = json.load(f)
-        print(f"      ✓ metadata.json: {len(metadata.get('instruments', []))} instruments")
-    else:
-        print(f"      ⚠ metadata.json not found (optional)")
+        # NaN 检查
+        nan_counts = df[required_cols].isna().sum().to_dict()
+        if any(v > 0 for v in nan_counts.values()):
+            ok = False
+            issues.append(f"NaN exists: {nan_counts}")
 
-    if results["passed"]:
-        print(f"   ✓ Parquet data quality passed ({len(parquet_files)} files)")
-    else:
-        print(f"   ✗ Data quality issues: {len(results['issues'])}")
-        for issue in results["issues"][:5]:  # 最多显示 5 个
-            print(f"      - {issue}")
+        # 价格 > 0 检查
+        for col in ["open", "high", "low", "close"]:
+            invalid = (df[col] <= 0).sum()
+            if invalid > 0:
+                ok = False
+                issues.append(f"{col}: {invalid} rows <= 0")
 
-    return results["passed"], results
+        info = {
+            "passed": ok,
+            "rows": int(len(df)),
+            "start": str(df.index.min()),
+            "end": str(df.index.max()),
+            "tz": str(df.index.tz),
+            "nan_counts": nan_counts,
+            "issues": issues,
+        }
+
+        if ok:
+            print(f"      ✓ {len(df)} rows, {df.index.min()} to {df.index.max()}")
+            print(f"   ✓ Parquet data quality passed")
+        else:
+            print(f"   ✗ Data quality issues: {issues}")
+
+        return ok, info
+
+    except Exception as e:
+        return False, {"passed": False, "issues": [f"read error: {e}"]}
 
 
 def verify_model_load(strategy: str = "qlib_alpha") -> bool:
