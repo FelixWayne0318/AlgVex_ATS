@@ -1,6 +1,6 @@
 # AlgVex 核心方案 (P0 - MVP)
 
-> **版本**: v10.0.2 (2026-01-03)
+> **版本**: v10.0.3 (2026-01-03)
 > **状态**: 唯一实现方案，可直接运行
 
 > **Qlib + Hummingbot 融合的加密货币现货量化交易平台**
@@ -163,7 +163,11 @@ def init_qlib(provider_uri: str = None):
     初始化 Qlib 用于加密货币 (无需修改源码)
 
     注意: v10.0.0 起，离线训练/回测改用 Parquet 文件，
-    此函数仅用于需要 Qlib API 的特殊场景。
+    此函数仅用于以下特殊场景:
+    - Controller 启动时需要 Qlib 运行时环境 (如 LGBModel 加载)
+    - 使用 Qlib 内置评估工具 (如 backtest.report)
+
+    训练/回测/实盘主流程不依赖此函数，直接使用 Parquet + unified_features。
     """
     # 使用 US 区域作为基础 (因为 US 也没有涨跌停限制)
     if provider_uri:
@@ -991,8 +995,10 @@ def main():
     parser.add_argument("--data-dir", type=str, default="~/.algvex/data")
     parser.add_argument("--output-dir", type=str, default="~/.algvex/models/qlib_alpha")
     parser.add_argument("--instruments", type=str, nargs="+", default=["btcusdt", "ethusdt"])
+    # 时间切分: 训练/验证集之间建议留 1-2 周 gap 避免数据泄漏
+    # 示例: train-end=06-15, valid-start=07-01 (留 2 周 gap)
     parser.add_argument("--train-start", type=str, default="2023-01-01")
-    parser.add_argument("--train-end", type=str, default="2024-06-30")
+    parser.add_argument("--train-end", type=str, default="2024-06-15")  # 提前 2 周
     parser.add_argument("--valid-start", type=str, default="2024-07-01")
     parser.add_argument("--valid-end", type=str, default="2024-12-31")
     parser.add_argument("--freq", type=str, default="1h")
@@ -1149,9 +1155,13 @@ def run_backtest(
     print(f"Loading model from {model_path}...")
     model, normalizer, feature_columns = load_model(model_path)
 
-    # 验证特征列 (严格模式)
-    if feature_columns != FEATURE_COLUMNS:
+    # 验证特征列 (v10.0.2: 更健壮的比较)
+    if set(feature_columns) != set(FEATURE_COLUMNS):
         raise ValueError("Feature columns mismatch! Retrain model.")
+    if feature_columns != FEATURE_COLUMNS:
+        import warnings
+        warnings.warn("Feature column order differs from code, using model's order")
+        # 使用模型训练时的列顺序，不影响预测结果
 
     # 解析时间
     test_start_ts = pd.Timestamp(test_start, tz="UTC")
@@ -2061,12 +2071,13 @@ python scripts/prepare_crypto_data.py \
     --output-dir ~/.algvex/data
 
 # 模型训练
+# 注意: train-end 与 valid-start 之间留 2 周 gap 避免数据泄漏
 python scripts/train_model.py \
     --data-dir ~/.algvex/data \
     --output-dir ~/.algvex/models/qlib_alpha \
     --instruments btcusdt ethusdt \
     --train-start 2023-01-01 \
-    --train-end 2024-06-30 \
+    --train-end 2024-06-15 \
     --valid-start 2024-07-01 \
     --valid-end 2024-12-31 \
     --freq 1h
@@ -2104,7 +2115,7 @@ cd hummingbot
 | 序号 | 验收项 | 验收方法 | 通过标准 |
 |------|--------|----------|----------|
 | 1 | 数据准备 | 运行 prepare_crypto_data.py | ~/.algvex/data/1h/*.parquet 生成 |
-| 2 | 模型训练 | 运行 train_model.py | model.pkl + normalizer.pkl + metadata.json 生成 |
+| 2 | 模型训练 | 运行 train_model.py | lgb_model.txt + normalizer.pkl + metadata.json 生成 |
 | 3 | **离线回测** | 运行 backtest_offline.py | Sharpe > 0.5, MaxDD < 30% |
 | 4 | Qlib 初始化 | Controller 启动 | region="us" + C["trade_unit"]=1 |
 | 5 | MarketDataProvider | Controller 运行 | get_candles_df() 返回 >= MIN_BARS 条数据 |
@@ -2286,8 +2297,8 @@ def verify_model_load(strategy: str = "qlib_alpha") -> bool:
         print("   ⚠ Run train_model.py first")
         return True  # 非阻断性
 
-    # 检查必需文件
-    required_files = ["model.pkl", "normalizer.pkl", "metadata.json"]
+    # 检查必需文件 (v10.0.2: lgb_model.txt 而非 model.pkl)
+    required_files = ["lgb_model.txt", "normalizer.pkl", "metadata.json"]
     missing = [f for f in required_files if not (model_dir / f).exists()]
 
     if missing:
@@ -2297,11 +2308,11 @@ def verify_model_load(strategy: str = "qlib_alpha") -> bool:
     try:
         import pickle
         import json
+        import lightgbm as lgb
 
-        # 加载模型
-        with open(model_dir / "model.pkl", "rb") as f:
-            model = pickle.load(f)
-        print(f"      ✓ model.pkl: {type(model).__name__}")
+        # 加载模型 (LightGBM 原生格式)
+        model = lgb.Booster(model_file=str(model_dir / "lgb_model.txt"))
+        print(f"      ✓ lgb_model.txt: {type(model).__name__}")
 
         # 加载 normalizer
         with open(model_dir / "normalizer.pkl", "rb") as f:
@@ -2320,9 +2331,21 @@ def verify_model_load(strategy: str = "qlib_alpha") -> bool:
 
 
 def verify_feature_computation() -> bool:
-    """验证统一特征计算 (v10.0.0: compute_unified_features)"""
+    """验证统一特征计算 (v10.0.2: 直接导入 unified_features)"""
     print("4. Testing unified feature computation...")
     try:
+        # 导入统一特征模块 (与训练/回测/实盘完全一致)
+        try:
+            from scripts.unified_features import (
+                compute_unified_features,
+                FEATURE_COLUMNS,
+            )
+        except ImportError:
+            from unified_features import (
+                compute_unified_features,
+                FEATURE_COLUMNS,
+            )
+
         # Mock OHLCV 数据 (100 根 K 线)
         np.random.seed(42)
         n = 100
@@ -2334,50 +2357,15 @@ def verify_feature_computation() -> bool:
             "close": np.random.uniform(40000, 42000, n),
             "volume": np.random.uniform(100, 1000, n),
         })
+        df = df.set_index("datetime")
 
-        # 模拟 compute_unified_features
-        close = df["close"]
-        open_ = df["open"]
-        high = df["high"]
-        low = df["low"]
-        volume = df["volume"]
+        # 使用统一特征计算 (与训练/回测/实盘完全一致)
+        features = compute_unified_features(df)
 
-        features = pd.DataFrame()
-
-        # KBAR 因子
-        features["KMID"] = (close - open_) / open_
-        features["KLEN"] = (high - low) / open_
-        features["KMID2"] = (close - open_) / (high - low + 1e-12)
-        features["KUP"] = (high - np.maximum(open_, close)) / open_
-        features["KUP2"] = (high - np.maximum(open_, close)) / (high - low + 1e-12)
-        features["KLOW"] = (np.minimum(open_, close) - low) / open_
-        features["KLOW2"] = (np.minimum(open_, close) - low) / (high - low + 1e-12)
-        features["KSFT"] = (2 * close - high - low) / open_
-        features["KSFT2"] = (2 * close - high - low) / (high - low + 1e-12)
-
-        # ROC/MA 因子
-        for d in [5, 10, 20, 30, 60]:
-            features[f"ROC{d}"] = close / close.shift(d) - 1
-            ma = close.rolling(d).mean()
-            features[f"MA{d}"] = close / ma - 1
-            std = close.rolling(d).std()
-            features[f"STD{d}"] = std / close
-
-        # RSRS 因子
-        for d in [5, 10, 20]:
-            features[f"RSRS{d}"] = high.rolling(d).max() / low.rolling(d).min() - 1
-
-        # VSUMP/VSUMN 因子
-        for d in [5, 10, 20]:
-            features[f"VSUMP{d}"] = volume.rolling(d).apply(
-                lambda x: x[x > x.mean()].sum() / x.sum(), raw=False
-            )
-
-        features = features.dropna()
-
-        # 验证
+        # 验证 (v10.0.2: 59 个特征)
         assert len(features) >= MIN_BARS - 60, f"Expected >= {MIN_BARS - 60} rows, got {len(features)}"
-        assert len(features.columns) >= 30, f"Expected >= 30 features, got {len(features.columns)}"
+        assert len(features.columns) >= 59, f"Expected >= 59 features, got {len(features.columns)}"
+        assert set(features.columns) == set(FEATURE_COLUMNS), "Feature columns mismatch!"
 
         print(f"   ✓ Computed {len(features.columns)} features, {len(features)} valid samples")
         return True
@@ -2582,6 +2570,24 @@ pyarrow >= 14.0.0 (Parquet 支持)
 
 ### C. 变更日志
 
+**v10.0.3** (2026-01-03) - 专家评估修复 (P0/P1)
+
+- **P0 修复**: 模型文件命名统一为 `lgb_model.txt`
+  - 验收标准、验证脚本、文档说明全部统一
+  - 删除所有 `model.pkl` 引用
+- **P0 修复**: 验证脚本特征计算改为导入 `unified_features`
+  - 删除重复实现的 RSRS/VSUMP 等非标准特征
+  - 断言特征数量 `>= 59` (原 `>= 30`)
+- **P1 修复**: 训练/验证集时间切分添加 2 周 gap
+  - `train-end: 2024-06-15` (原 2024-06-30)
+  - 避免数据泄漏
+- **P1 修复**: `feature_columns` 验证逻辑增强
+  - 先比较 set 判断特征集是否一致
+  - 顺序不同仅警告，不阻断
+- **P1 补充**: `init_qlib()` 使用场景说明
+  - 明确仅用于 Controller 启动或 Qlib 评估工具
+  - 主流程不依赖此函数
+
 **v10.0.2** (2026-01-03) - 专家评估修复
 
 - **修复**: `--data-dir` 命令路径错误
@@ -2664,7 +2670,7 @@ pyarrow >= 14.0.0 (Parquet 支持)
 
 - **目录结构更新**
   - 数据: `~/.algvex/data/{freq}/` (替代 `~/.qlib/`)
-  - 模型: `~/.algvex/models/{strategy}/` (包含 model.pkl, normalizer.pkl, metadata.json)
+  - 模型: `~/.algvex/models/{strategy}/` (包含 lgb_model.txt, normalizer.pkl, metadata.json)
 
 **v9.0.2** (2026-01-02) - 专家反馈精细修正
 - **修正**: `time_per_step` 配置位置说明
