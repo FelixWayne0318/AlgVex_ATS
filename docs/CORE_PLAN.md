@@ -46,7 +46,9 @@
 │  3. 回测=实盘 (v10.0.0 核心)                                 │
 │     - 训练/回测/实盘使用完全相同的特征计算链路              │
 │     - unified_features → normalizer → Booster.predict       │
-│     - 禁止使用 Alpha158/DatasetH 等与实盘不同的接口         │
+│     - 禁止在回测/实盘链路中引入 Alpha158/DatasetH 等接口     │
+│       （它们默认依赖 Qlib Provider/.bin + DataHandler；      │
+│        与本方案"实时 DataFrame → unified_features"的架构不匹配）│
 │                                                             │
 │  4. V2 架构优势                                              │
 │     - 数据获取: MarketDataProvider 统一接口                 │
@@ -179,6 +181,45 @@ def init_qlib(provider_uri: str = None):
 > - `region="us"` 是固定值，因为 US 区域没有涨跌停限制，适合加密货币
 > - `trade_unit=1` 避免 Qlib 撮合时的整数取整问题
 > - 实际最小下单量约束由 Hummingbot / 交易所规则处理
+
+### 3.2 为什么不采用 Qlib 官方 Online Serving 链路
+
+> **口径修正**: 这不是"Qlib 回测与实盘不同"的设计问题，
+> 而是 **Qlib 官方在线服务依赖 Provider/.bin + DataHandler 的离线数据管线，不适合本方案的实时 DataFrame 架构**。
+
+**Qlib 官方 Online Serving（面向股票的合理工程假设）**
+
+```
+训练阶段: Alpha158 → DatasetH(DataHandler) → Model.fit()
+在线阶段: 定期更新 Provider/.bin 数据 → 相同的 Alpha158 + DataHandler → Model.predict() → 信号
+
+官方组件: OnlineManager / Updater / (可选) Qlib-Server
+```
+
+**我们的场景（加密货币 1h / 实时自动执行）**
+
+```
+数据源: Hummingbot MarketDataProvider 提供实时 OHLCV DataFrame
+执行:   实时信号 → 自动下单 (Controller/Executors)
+```
+
+**核心冲突（不是缺陷，是不匹配）**
+
+| 对比 | Qlib 官方链路 | 本方案链路 |
+|------|--------------|-----------|
+| 数据来源 | Provider/.bin (离线更新) | 实时 OHLCV DataFrame |
+| 特征计算 | Alpha158/DataHandler | compute_unified_features() |
+| 更新频率 | 日线/定期批量 | 小时线/实时推送 |
+
+若强行走官方在线链路，需要把 DataFrame **实时落地并持续增量更新**到 Qlib Provider/.bin，
+并维护 calendar/instrument 对齐、缺口修复、date_index 对齐等。
+这条"在线落地 .bin"链路会成为实盘关键依赖：**复杂、易错、排障成本高**。
+
+**v10.0.0 唯一口径（保持回测=实盘）**
+
+- 训练/回测/实盘统一输入：`OHLCV (DataFrame/Parquet)`
+- 统一特征链路：`compute_unified_features() → normalizer.transform(strict=True) → LightGBM.predict()`
+- 因此：在回测/实盘链路中 **禁止引入** `Alpha158/DatasetH/Qlib backtest/TopkDropoutStrategy` 等 **.bin 依赖链路**
 
 ---
 
@@ -969,6 +1010,11 @@ if __name__ == "__main__":
 > **v10.0.0 核心**: 离线回测必须与实盘使用**完全相同**的链路。
 >
 > ⚠️ **禁止**: 不得使用 Alpha158/DatasetH/TopkDropoutStrategy/Qlib backtest。
+>
+> **说明（口径修正）**：
+> - 这不是"Qlib 回测与实盘不同"的设计问题；
+> - 而是这些路径默认依赖 **Provider/.bin + DataHandler** 的离线数据管线；
+> - 本方案实盘输入是 Hummingbot 实时 OHLCV DataFrame，为保持"回测=实盘"，必须禁止把 .bin 依赖链路掺入回测/实盘。
 
 ### 6.1 回测原则
 
