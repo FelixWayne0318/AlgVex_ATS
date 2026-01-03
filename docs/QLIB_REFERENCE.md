@@ -678,60 +678,56 @@ mlflow ui
 
 ---
 
-## 10. 与 AlgVex 项目的关系
+## 10. 与 AlgVex 项目的关系（以 AlgVex v10.0.0+ 为准）
 
-### 10.1 已采用的 Qlib 组件
+### 10.1 AlgVex 实际采用的能力（当前口径）
 
-| 组件 | AlgVex 中的使用 |
-|------|----------------|
-| **REG_CRYPTO** | 自定义加密货币区域配置 |
-| **Alpha158** | 特征工程 (训练阶段) |
-| **LGBModel** | 价格预测模型 |
-| **DatasetH** | 数据集管理 |
-| **RobustZScoreNorm** | 标签标准化 |
-| **TopkDropoutStrategy** | 回测策略 |
+> **说明**: AlgVex v10 的生产链路不再依赖 Qlib 的 .bin、Alpha158、DatasetH、TopkDropoutStrategy。
 
-### 10.2 未采用的组件
+| 能力/组件 | 在 AlgVex 中的定位 |
+|-----------|-------------------|
+| **qlib.init / 基础环境** | **可选**：仅用于离线研究/对照实验（不改源码，`region="us"` 即可） |
+| **Recorder / MLflow** | **可选**：离线实验记录与对照，不进入生产链路 |
+| **其他（Alpha158、DatasetH、Qlib Backtest、Online Serving）** | **不用于生产**：与 DataFrame 实时链路不匹配 |
 
-| 组件 | 原因 |
-|------|------|
-| **官方 Crypto Collector** | 仅支持日线，不支持回测 |
-| **CSRankNorm** | 不适合少量品种 |
-| **Qlib-Server** | MVP 阶段使用本地部署 |
-| **RL 框架** | 未来增强方向 |
+### 10.2 为什么不采用 Qlib 官方 Online Serving（关键口径）
 
-### 10.3 AlgVex 定制
+Qlib 官方 Online Serving 的一致性原则是正确的：训练与在线使用相同的 DataHandler/Alpha，
+通过定期更新 `.bin` 数据来得到最新特征并预测。
+
+但对 AlgVex（加密小时线/准实时）而言存在结构性不匹配：
+- Qlib 的特征/在线预测默认依赖 `.bin` 数据存储与 DataHandler 读取。
+- 我们的行情入口是 Hummingbot MarketDataProvider 输出的 OHLCV DataFrame。
+- 若强行用 Alpha158，需要把实时 DataFrame 持续转换/落地成 Qlib `.bin`（或实现一套 DataProvider 兼容层）：
+  复杂、易错、延迟高、运维成本大。
+
+因此 AlgVex v10 采用 "统一特征链路"：
+```
+OHLCV DataFrame → compute_unified_features() → FeatureNormalizer(strict=True) → LightGBM.predict()
+```
+实现训练/回测/实盘同代码、同特征、同归一化。
+
+### 10.3 AlgVex v10 统一链路（训练/回测/实盘）
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    AlgVex 数据流                             │
+│  数据源                                                     │
+│  - 离线：Parquet OHLCV（由脚本准备）                        │
+│  - 在线：Hummingbot candles OHLCV DataFrame                 │
 ├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  Binance API                                                │
-│      ↓                                                      │
-│  prepare_crypto_data.py    → 自定义数据准备                 │
-│      ↓                                                      │
-│  Qlib .bin 格式            → 标准 Qlib 数据                 │
-│      ↓                                                      │
-│  Alpha158 + LGBModel       → Qlib 模型训练                  │
-│      ↓                                                      │
-│  backtest_model.py         → Qlib 回测验证                  │
-│      ↓                                                      │
-│  QlibAlphaController       → 实盘信号生成                   │
-│      ↓                                                      │
-│  Hummingbot V2             → 订单执行                       │
-│                                                             │
+│  唯一特征链路（统一）                                       │
+│  OHLCV → compute_unified_features() → normalizer(strict=True)│
+│        → LightGBM.predict() → 信号/风控 → 执行              │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 10.4 未来增强方向
+### 10.4 未来若要回归 Qlib Online Serving，需要满足的工程条件（前瞻）
 
-| 优先级 | 增强项 | Qlib 组件 |
-|--------|--------|-----------|
-| P2 | 深度学习模型 | LSTM, Transformer |
-| P2 | 在线更新 | OnlineManager |
-| P3 | 执行优化 | RL Framework |
-| P3 | 分布式计算 | Qlib-Server |
+若未来一定要使用 Qlib 的 OnlineManager/Updater/Qlib-Server：
+- 需要建立稳定的 "实时→增量→.bin" 更新流水线（含交易日历/频率对齐/缺失补齐/回滚策略）
+- 或实现 DataHandler 的实时数据提供层（等价复杂度）
+
+在没有上述工程能力之前，v10 的 unified_features 是更稳健的生产选择。
 
 ---
 
@@ -741,13 +737,21 @@ mlflow ui
 
 ```python
 import qlib
-from qlib.constant import REG_CRYPTO
 
+# AlgVex v10: 使用 region="us"，不修改 Qlib 源码
+# 注: 生产链路不依赖 Qlib provider，此处仅用于离线研究/对照实验
 qlib.init(
-    provider_uri="~/.qlib/qlib_data/crypto_data",
-    region=REG_CRYPTO,
+    provider_uri="~/.algvex/data",   # 可选，生产链路使用 Parquet
+    region="us",                      # 不使用 REG_CRYPTO
 )
+
+# 运行时覆盖配置（如需）
+from qlib.config import C
+C["trade_unit"] = 1
+C["limit_threshold"] = None
 ```
+
+> **注意**: AlgVex v10 不再使用 REG_CRYPTO，也不要求修改 Qlib 源码。
 
 ### 数据加载
 
@@ -791,10 +795,19 @@ report, positions = backtest_daily(strategy=strategy, ...)
 
 ## 附录 B: 常见问题
 
-### Q1: REG_CRYPTO 未定义
+### Q1: 看到 REG_CRYPTO 相关报错？
 
-**原因**: 未修改 Qlib 源码
-**解决**: 按 CORE_PLAN.md 第 3 节修改 `constant.py` 和 `config.py`
+**结论**: AlgVex v10 不使用 REG_CRYPTO，也不要求修改 Qlib 源码。
+
+**解决**: 请移除示例中的 REG_CRYPTO，并改用 `region="us"`：
+```python
+# 错误 (旧方案)
+from qlib.constant import REG_CRYPTO
+qlib.init(region=REG_CRYPTO)
+
+# 正确 (v10)
+qlib.init(region="us")
+```
 
 ### Q2: 数据加载失败
 
