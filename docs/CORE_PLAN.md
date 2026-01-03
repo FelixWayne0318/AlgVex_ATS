@@ -1806,8 +1806,8 @@ class QlibAlphaController(ControllerBase):
             self.logger.error(f"Error creating executor: {e}")
             return None
 
-    def get_active_executors(self) -> List[ExecutorBase]:
-        """获取活跃的 Executors"""
+    def get_active_executors(self) -> List[ExecutorInfo]:
+        """获取活跃的 Executors (v10.0.4: 返回 ExecutorInfo 而非 ExecutorBase)"""
         return [
             executor
             for executor in self.executors_info

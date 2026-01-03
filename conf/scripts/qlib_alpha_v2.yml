@@ -1,0 +1,22 @@
+# Qlib Alpha V2 策略配置
+
+# 市场配置 (用于数据订阅)
+markets:
+  binance:
+    - BTC-USDT
+    - ETH-USDT
+
+# K 线配置 (用于 MarketDataProvider)
+candles_config:
+  - connector: binance
+    trading_pair: BTC-USDT
+    interval: 1h
+    max_records: 100
+
+# V2 策略控制器配置
+# 格式: List[str] - 引用 conf/controllers/ 下的配置文件名
+controllers_config:
+  - qlib_alpha.yml
+
+# 可添加多个控制器实现多品种交易
+# - qlib_alpha_eth.yml
