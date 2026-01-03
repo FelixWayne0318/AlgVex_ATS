@@ -89,12 +89,11 @@ venv\Scripts\activate
 ### Step 5: 安装基础依赖
 
 ```cmd
-pip install --upgrade pip
-
-pip install numpy pandas pyarrow
-pip install lightgbm scikit-learn
-pip install plotly jupyter notebook
+python -m pip install --upgrade pip
+python -m pip install numpy pandas pyarrow lightgbm scikit-learn plotly jupyter notebook
 ```
+
+> **注意**: Windows 上必须使用 `python -m pip` 而不是直接 `pip`，否则升级 pip 时会报错。
 
 ### Step 6: 创建数据目录
 
