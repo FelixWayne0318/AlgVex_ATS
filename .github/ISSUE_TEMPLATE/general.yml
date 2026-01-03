@@ -1,25 +1,12 @@
 name: General Issue
-description: Create a general issue for AlgVex ATS
-title: "[General] "
-labels: []
+description: Open a general issue
+title: "[General]: "
+labels: ["general"]
 body:
-  - type: markdown
-    attributes:
-      value: |
-        Thanks for taking the time to create an issue!
   - type: textarea
     id: description
     attributes:
       label: Description
-      description: Describe your issue or topic
-      placeholder: What would you like to discuss?
+      description: What would you like to discuss?
     validations:
       required: true
-  - type: textarea
-    id: additional
-    attributes:
-      label: Additional context
-      description: Any additional information (optional)
-      placeholder: Add any other context here
-    validations:
-      required: false
