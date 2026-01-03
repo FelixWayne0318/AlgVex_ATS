@@ -1,6 +1,6 @@
 # AlgVex 核心方案 (P0 - MVP)
 
-> **版本**: v10.0.3 (2026-01-03)
+> **版本**: v10.0.4 (2026-01-03)
 > **状态**: 唯一实现方案，可直接运行
 
 > **Qlib + Hummingbot 融合的加密货币现货量化交易平台**
@@ -1194,15 +1194,24 @@ def run_backtest(
             raise ValueError(f"Missing features: {missing}")
         features = features[feature_columns]
 
-        # 归一化 (strict=True)
-        features_norm = normalizer.transform(features, strict=True)
+        # v10.0.4: 剔除滚动窗口 NaN (前 60 行)，避免 strict=True 报错
+        valid_mask = ~features.isna().any(axis=1)
+        features_valid = features[valid_mask]
+        df_valid = df.loc[features_valid.index]  # 同步裁剪 df
+
+        if len(features_valid) < 10:
+            print(f"  Skipping {inst}: insufficient valid features ({len(features_valid)})")
+            continue
+
+        # 归一化 (strict=True) - 此时已无 NaN
+        features_norm = normalizer.transform(features_valid, strict=True)
 
         # 预测
         predictions = model.predict(features_norm.values)
 
-        # 仿真交易
+        # 仿真交易 (使用裁剪后的 df_valid，predictions 已对齐)
         result = simulate_trading(
-            df, predictions, config, inst
+            df_valid, predictions, config, inst
         )
         all_results.append(result)
 
@@ -1542,7 +1551,8 @@ class QlibAlphaControllerConfig(ControllerConfigBase):
     trading_pair: str = Field(default="BTC-USDT")
     order_amount_usd: Decimal = Field(default=Decimal("100"))
 
-    # 模型配置 (v10.0.0: 目录结构，包含 model.pkl + normalizer.pkl + metadata.json)
+    # 模型配置 (v10.0.4: 4 件套)
+    # 包含 lgb_model.txt + normalizer.pkl + feature_columns.pkl + metadata.json
     model_dir: str = Field(default="~/.algvex/models/qlib_alpha")
 
     # 信号配置
@@ -1869,15 +1879,15 @@ class QlibAlphaStrategy(StrategyV2Base):
 
     @classmethod
     def init_markets(cls, config: QlibAlphaStrategyConfig):
-        """初始化市场配置"""
-        # 从控制器配置中提取交易对
-        cls.markets = {}
-        for controller_config in config.controllers_config:
-            connector = controller_config.get("connector_name", "binance")
-            trading_pair = controller_config.get("trading_pair", "BTC-USDT")
-            if connector not in cls.markets:
-                cls.markets[connector] = set()
-            cls.markets[connector].add(trading_pair)
+        """
+        初始化市场配置 (v10.0.4)
+
+        直接使用 YAML 中的 markets 配置，不从 controllers_config 推导。
+        controllers_config 使用 List[str] 格式 (引用配置文件名)，
+        不能当作 dict 使用。
+        """
+        # 直接使用 config.markets (YAML 已定义)
+        cls.markets = config.markets if hasattr(config, 'markets') else {}
 
     def __init__(self, connectors: Dict[str, ConnectorBase], config: QlibAlphaStrategyConfig):
         super().__init__(connectors, config)
@@ -1903,8 +1913,9 @@ class QlibAlphaStrategy(StrategyV2Base):
 
         for name, controller in self.controllers.items():
             lines.append(f"\n[Controller: {name}]")
-            lines.append(f"  Qlib Initialized: {controller.qlib_initialized}")
-            lines.append(f"  Model Loaded: {controller.model is not None}")
+            # v10.0.4: 使用 model_loaded (QlibAlphaController 实际存在的字段)
+            lines.append(f"  Model Loaded: {controller.model_loaded}")
+            lines.append(f"  Model: {type(controller.model).__name__ if controller.model else 'None'}")
             active = len(controller.get_active_executors())
             lines.append(f"  Active Executors: {active}")
 
@@ -2160,17 +2171,20 @@ MIN_BARS = 61  # 与 Controller 一致
 
 def verify_qlib_runtime_config() -> bool:
     """
-    验证 Qlib 运行时配置 (v10.0.0: 仅 region="us" 方案)
+    验证 Qlib 运行时配置覆盖能力 (v10.0.4)
 
-    不需要源码修改，通过 region="us" + 运行时覆盖即可
+    v10.0.4 修正:
+    - 不再用 Parquet 目录作为 provider_uri (语义不清)
+    - 只验证 C 配置覆盖功能是否可用
+    - 此项为可选验证，失败不阻断 MVP (主流程用 Parquet + unified_features)
     """
-    print("1. Testing Qlib runtime config...")
+    print("1. Testing Qlib runtime config (optional)...")
     try:
         import qlib
         from qlib.config import C
 
-        # 使用 region="us" 初始化
-        qlib.init(provider_uri=str(DATA_DIR / "1h"), region="us")
+        # v10.0.4: 不调用 qlib.init，只验证 C 配置覆盖能力
+        # 主流程不依赖 Qlib Provider，使用 Parquet + unified_features
 
         # 验证运行时覆盖
         C["trade_unit"] = 1  # 加密货币无最小交易单位
@@ -2179,14 +2193,14 @@ def verify_qlib_runtime_config() -> bool:
         assert C["trade_unit"] == 1, f"Expected trade_unit=1, got {C['trade_unit']}"
         assert C["limit_threshold"] is None, f"Expected None, got {C['limit_threshold']}"
 
-        print("   ✓ Qlib runtime config valid (region=us, trade_unit=1)")
+        print("   ✓ Qlib C[] override works (trade_unit=1, limit_threshold=None)")
         return True
     except ImportError:
-        print("   ⚠ Qlib not installed (optional for offline backtest)")
+        print("   ⚠ Qlib not installed (optional - main flow uses Parquet)")
         return True  # 非阻断性
     except Exception as e:
-        print(f"   ✗ Qlib config failed: {e}")
-        return False
+        print(f"   ⚠ Qlib config test failed: {e} (optional, not blocking)")
+        return True  # v10.0.4: 改为非阻断性
 
 
 def verify_parquet_data(freq: str = "1h") -> Tuple[bool, dict]:
@@ -2297,8 +2311,8 @@ def verify_model_load(strategy: str = "qlib_alpha") -> bool:
         print("   ⚠ Run train_model.py first")
         return True  # 非阻断性
 
-    # 检查必需文件 (v10.0.2: lgb_model.txt 而非 model.pkl)
-    required_files = ["lgb_model.txt", "normalizer.pkl", "metadata.json"]
+    # 检查必需文件 (v10.0.4: 4 件套)
+    required_files = ["lgb_model.txt", "normalizer.pkl", "feature_columns.pkl", "metadata.json"]
     missing = [f for f in required_files if not (model_dir / f).exists()]
 
     if missing:
@@ -2310,19 +2324,35 @@ def verify_model_load(strategy: str = "qlib_alpha") -> bool:
         import json
         import lightgbm as lgb
 
+        # 导入 FeatureNormalizer (与训练/回测/实盘一致)
+        try:
+            from scripts.unified_features import FeatureNormalizer
+        except ImportError:
+            from unified_features import FeatureNormalizer
+
         # 加载模型 (LightGBM 原生格式)
         model = lgb.Booster(model_file=str(model_dir / "lgb_model.txt"))
         print(f"      ✓ lgb_model.txt: {type(model).__name__}")
 
-        # 加载 normalizer
-        with open(model_dir / "normalizer.pkl", "rb") as f:
-            normalizer = pickle.load(f)
-        print(f"      ✓ normalizer.pkl: fitted={normalizer.fitted}")
+        # 加载 normalizer (v10.0.4: 使用 FeatureNormalizer.load)
+        normalizer = FeatureNormalizer()
+        normalizer.load(str(model_dir / "normalizer.pkl"))
+        print(f"      ✓ normalizer.pkl: fitted={normalizer.fitted}, {len(normalizer.feature_columns)} features")
 
-        # 加载 metadata
+        # 加载 feature_columns
+        with open(model_dir / "feature_columns.pkl", "rb") as f:
+            feature_columns = pickle.load(f)
+        print(f"      ✓ feature_columns.pkl: {len(feature_columns)} features")
+
+        # 加载 metadata 并校验
         with open(model_dir / "metadata.json") as f:
             metadata = json.load(f)
-        print(f"      ✓ metadata.json: {len(metadata.get('feature_columns', []))} features")
+        feature_count = metadata.get("feature_count", 0)
+        print(f"      ✓ metadata.json: feature_count={feature_count}")
+
+        # 校验一致性
+        if feature_count != len(feature_columns):
+            print(f"   ⚠ Warning: metadata.feature_count ({feature_count}) != feature_columns ({len(feature_columns)})")
 
         return True
     except Exception as e:
@@ -2362,10 +2392,10 @@ def verify_feature_computation() -> bool:
         # 使用统一特征计算 (与训练/回测/实盘完全一致)
         features = compute_unified_features(df)
 
-        # 验证 (v10.0.2: 59 个特征)
+        # 验证 (v10.0.4: 严格校验 59 个特征 + 顺序一致)
         assert len(features) >= MIN_BARS - 60, f"Expected >= {MIN_BARS - 60} rows, got {len(features)}"
-        assert len(features.columns) >= 59, f"Expected >= 59 features, got {len(features.columns)}"
-        assert set(features.columns) == set(FEATURE_COLUMNS), "Feature columns mismatch!"
+        assert len(features.columns) == len(FEATURE_COLUMNS), f"Expected {len(FEATURE_COLUMNS)} features, got {len(features.columns)}"
+        assert list(features.columns) == FEATURE_COLUMNS, "Feature columns order mismatch!"
 
         print(f"   ✓ Computed {len(features.columns)} features, {len(features)} valid samples")
         return True
@@ -2377,41 +2407,16 @@ def verify_feature_computation() -> bool:
 
 
 def verify_normalizer_strict() -> bool:
-    """验证 Normalizer strict 模式 (v10.0.0)"""
+    """验证 Normalizer strict 模式 (v10.0.4: 使用真实 FeatureNormalizer)"""
     print("5. Testing FeatureNormalizer strict mode...")
     try:
-        # 模拟 FeatureNormalizer
-        class MockNormalizer:
-            def __init__(self):
-                self.fitted = False
-                self.mean = None
-                self.std = None
-                self.feature_columns = None
+        # v10.0.4: 导入真实 FeatureNormalizer (与训练/回测/实盘一致)
+        try:
+            from scripts.unified_features import FeatureNormalizer
+        except ImportError:
+            from unified_features import FeatureNormalizer
 
-            def fit_transform(self, features):
-                self.fitted = True
-                self.feature_columns = features.columns.tolist()
-                self.mean = features.mean()
-                self.std = features.std() + 1e-8
-                return (features - self.mean) / self.std
-
-            def transform(self, features, strict=True):
-                if not self.fitted:
-                    raise ValueError("Not fitted")
-
-                expected = set(self.feature_columns)
-                actual = set(features.columns)
-                missing = expected - actual
-
-                if missing and strict:
-                    raise ValueError(f"Missing columns: {missing}")
-
-                if strict and features.isna().any().any():
-                    raise ValueError("Contains NaN")
-
-                return (features - self.mean) / self.std
-
-        normalizer = MockNormalizer()
+        normalizer = FeatureNormalizer()
 
         # 训练数据
         train_df = pd.DataFrame({
@@ -2569,6 +2574,29 @@ pyarrow >= 14.0.0 (Parquet 支持)
 | 回测与实盘不一致 | 确保使用 iloc[-2] 和 strict=True |
 
 ### C. 变更日志
+
+**v10.0.4** (2026-01-03) - 专家评估修复 (完整 P0/P1)
+
+- **P0 修复**: backtest_offline.py 剔除滚动窗口 NaN
+  - transform(strict=True) 前过滤 NaN 行
+  - df/features/predictions 索引对齐
+- **P0 修复**: verify_model_load 使用 FeatureNormalizer.load
+  - 不再用 pickle.load 直接读 dict
+  - required_files 添加 feature_columns.pkl (4 件套)
+  - metadata 校验 feature_count
+- **P0 修复**: init_markets 直接使用 config.markets
+  - 不再从 controllers_config (List[str]) 推导 markets
+  - 避免把 str 当 dict 用的类型错误
+- **P0 修复**: format_status 改用 model_loaded
+  - 删除不存在的 qlib_initialized 字段
+- **P1 修复**: ControllerConfig 注释改为 4 件套
+- **P1 修复**: verify_feature_computation 严格校验
+  - list(features.columns) == FEATURE_COLUMNS (顺序敏感)
+- **P1 修复**: verify_qlib_runtime_config 改为非阻断
+  - 不再用 Parquet 目录当 provider_uri
+  - 只验证 C[] 配置覆盖能力
+- **P1 修复**: verify_normalizer_strict 使用真实 FeatureNormalizer
+  - 删除 MockNormalizer，导入真实实现
 
 **v10.0.3** (2026-01-03) - 专家评估修复 (P0/P1)
 
