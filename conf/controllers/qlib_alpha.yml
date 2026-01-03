@@ -1,0 +1,30 @@
+# Qlib Alpha V2 控制器配置
+
+# 控制器标识 (必需字段，用于 Executor 关联)
+id: qlib_alpha_btc
+
+# 控制器元信息
+controller_name: qlib_alpha
+controller_type: directional_trading
+
+# 交易配置
+connector_name: binance
+trading_pair: BTC-USDT
+order_amount_usd: 100
+
+# 模型配置 (v10.0.0: 目录结构)
+model_dir: ~/.algvex/models/qlib_alpha
+
+# 信号配置
+signal_threshold: 0.005    # 0.5% 收益率阈值
+prediction_interval: 1h
+lookback_bars: 100
+
+# 三重屏障配置 (PositionExecutor 自动管理)
+stop_loss: 0.02            # 2% 止损
+take_profit: 0.03          # 3% 止盈
+time_limit: 3600           # 1小时持仓限制
+
+# 执行配置
+cooldown_interval: 60      # 60秒冷却
+max_executors_per_side: 1  # 每方向最多1个执行器
