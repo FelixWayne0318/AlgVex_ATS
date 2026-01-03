@@ -71,8 +71,16 @@ git --version
 
 ### Step 3: 克隆项目
 
+**CMD:**
 ```cmd
 cd %USERPROFILE%
+git clone https://github.com/FelixWayne0318/AlgVex_ATS.git
+cd AlgVex_ATS
+```
+
+**PowerShell:**
+```powershell
+cd $env:USERPROFILE
 git clone https://github.com/FelixWayne0318/AlgVex_ATS.git
 cd AlgVex_ATS
 ```
@@ -89,18 +97,24 @@ venv\Scripts\activate
 ### Step 5: 安装基础依赖
 
 ```cmd
-pip install --upgrade pip
-
-pip install numpy pandas pyarrow
-pip install lightgbm scikit-learn
-pip install plotly jupyter notebook
+python -m pip install --upgrade pip
+python -m pip install numpy pandas pyarrow lightgbm scikit-learn plotly jupyter notebook
 ```
+
+> **注意**: Windows 上必须使用 `python -m pip` 而不是直接 `pip`，否则升级 pip 时会报错。
 
 ### Step 6: 创建数据目录
 
+**CMD:**
 ```cmd
 mkdir %USERPROFILE%\.algvex\data\1h
 mkdir %USERPROFILE%\.algvex\models\qlib_alpha
+```
+
+**PowerShell:**
+```powershell
+mkdir $env:USERPROFILE\.algvex\data\1h -Force
+mkdir $env:USERPROFILE\.algvex\models\qlib_alpha -Force
 ```
 
 ---
@@ -109,42 +123,29 @@ mkdir %USERPROFILE%\.algvex\models\qlib_alpha
 
 ### 方法 A: 生成模拟数据 (推荐新手)
 
-创建文件 `generate_mock_data.py`:
+项目已包含模拟数据生成脚本，直接运行:
 
-```python
-import pandas as pd
-import numpy as np
-from pathlib import Path
-
-data_dir = Path.home() / '.algvex' / 'data' / '1h'
-data_dir.mkdir(parents=True, exist_ok=True)
-
-# 生成 2 年模拟数据
-dates = pd.date_range('2023-01-01', '2024-12-31', freq='1h', tz='UTC')
-n = len(dates)
-
-for symbol, base_price in [('btcusdt', 30000), ('ethusdt', 2000)]:
-    np.random.seed(42 if symbol == 'btcusdt' else 43)
-    returns = np.random.randn(n) * 0.02
-    close = base_price * np.exp(np.cumsum(returns))
-
-    df = pd.DataFrame({
-        'open': close * (1 + np.random.randn(n) * 0.005),
-        'high': close * (1 + np.abs(np.random.randn(n)) * 0.01),
-        'low': close * (1 - np.abs(np.random.randn(n)) * 0.01),
-        'close': close,
-        'volume': np.random.uniform(100, 1000, n),
-    }, index=dates)
-
-    df.to_parquet(data_dir / f'{symbol}.parquet')
-    print(f'✅ Created {symbol}.parquet: {len(df)} bars')
-
-print(f'\n数据目录: {data_dir}')
+```cmd
+python scripts/generate_mock_data.py
 ```
 
-运行:
-```cmd
-python generate_mock_data.py
+输出示例:
+```
+==================================================
+AlgVex v10.0.4 - 模拟数据生成
+==================================================
+
+数据目录: C:\Users\xxx\.algvex\data\1h
+时间范围: 2023-01-01 ~ 2024-12-31
+数据点数: 17521 bars
+
+Created btcusdt.parquet: 17521 bars
+  - Price range: $15234.56 ~ $89012.34
+Created ethusdt.parquet: 17521 bars
+  - Price range: $1023.45 ~ $5678.90
+
+Data saved to: C:\Users\xxx\.algvex\data\1h
+Done!
 ```
 
 ### 方法 B: 获取真实数据
@@ -163,8 +164,15 @@ python scripts/train_model.py --instruments btcusdt ethusdt --train-start 2023-0
 ```
 
 训练完成后检查模型文件:
+
+**CMD:**
 ```cmd
 dir %USERPROFILE%\.algvex\models\qlib_alpha
+```
+
+**PowerShell:**
+```powershell
+dir $env:USERPROFILE\.algvex\models\qlib_alpha
 ```
 
 应该看到:
@@ -181,11 +189,21 @@ metadata.json        - 训练元信息
 
 ### 启动 Jupyter
 
+**CMD:**
 ```cmd
 cd %USERPROFILE%\AlgVex_ATS
 venv\Scripts\activate
 jupyter notebook
 ```
+
+**PowerShell:**
+```powershell
+cd $env:USERPROFILE\AlgVex_ATS
+.\venv\Scripts\Activate.ps1
+jupyter notebook
+```
+
+> **注意**: 如果 Jupyter 显示 "Notebook is not trusted"，点击右上角 **"Trust"** 按钮即可。
 
 ### 打开教程
 
@@ -297,6 +315,7 @@ python scripts/verify_integration.py
 │   ├── scripts\                   # 核心脚本 (不依赖 Hummingbot)
 │   │   ├── unified_features.py    # 59 因子计算
 │   │   ├── prepare_crypto_data.py # 数据准备
+│   │   ├── generate_mock_data.py  # 模拟数据生成
 │   │   ├── train_model.py         # 模型训练
 │   │   ├── backtest_offline.py    # 离线回测
 │   │   └── verify_integration.py  # 集成验证
@@ -355,7 +374,10 @@ jupyter notebook
 
 ### Q4: 数据文件不存在
 
-运行 Step 3 生成模拟数据。
+运行模拟数据生成脚本:
+```cmd
+python scripts/generate_mock_data.py
+```
 
 ### Q5: 模型文件不存在
 
