@@ -108,42 +108,29 @@ mkdir %USERPROFILE%\.algvex\models\qlib_alpha
 
 ### 方法 A: 生成模拟数据 (推荐新手)
 
-创建文件 `generate_mock_data.py`:
+项目已包含模拟数据生成脚本，直接运行:
 
-```python
-import pandas as pd
-import numpy as np
-from pathlib import Path
-
-data_dir = Path.home() / '.algvex' / 'data' / '1h'
-data_dir.mkdir(parents=True, exist_ok=True)
-
-# 生成 2 年模拟数据
-dates = pd.date_range('2023-01-01', '2024-12-31', freq='1h', tz='UTC')
-n = len(dates)
-
-for symbol, base_price in [('btcusdt', 30000), ('ethusdt', 2000)]:
-    np.random.seed(42 if symbol == 'btcusdt' else 43)
-    returns = np.random.randn(n) * 0.02
-    close = base_price * np.exp(np.cumsum(returns))
-
-    df = pd.DataFrame({
-        'open': close * (1 + np.random.randn(n) * 0.005),
-        'high': close * (1 + np.abs(np.random.randn(n)) * 0.01),
-        'low': close * (1 - np.abs(np.random.randn(n)) * 0.01),
-        'close': close,
-        'volume': np.random.uniform(100, 1000, n),
-    }, index=dates)
-
-    df.to_parquet(data_dir / f'{symbol}.parquet')
-    print(f'✅ Created {symbol}.parquet: {len(df)} bars')
-
-print(f'\n数据目录: {data_dir}')
+```cmd
+python scripts/generate_mock_data.py
 ```
 
-运行:
-```cmd
-python generate_mock_data.py
+输出示例:
+```
+==================================================
+AlgVex v10.0.4 - 模拟数据生成
+==================================================
+
+数据目录: C:\Users\xxx\.algvex\data\1h
+时间范围: 2023-01-01 ~ 2024-12-31
+数据点数: 17521 bars
+
+Created btcusdt.parquet: 17521 bars
+  - Price range: $15234.56 ~ $89012.34
+Created ethusdt.parquet: 17521 bars
+  - Price range: $1023.45 ~ $5678.90
+
+Data saved to: C:\Users\xxx\.algvex\data\1h
+Done!
 ```
 
 ### 方法 B: 获取真实数据
@@ -296,6 +283,7 @@ python scripts/verify_integration.py
 │   ├── scripts\                   # 核心脚本 (不依赖 Hummingbot)
 │   │   ├── unified_features.py    # 59 因子计算
 │   │   ├── prepare_crypto_data.py # 数据准备
+│   │   ├── generate_mock_data.py  # 模拟数据生成
 │   │   ├── train_model.py         # 模型训练
 │   │   ├── backtest_offline.py    # 离线回测
 │   │   └── verify_integration.py  # 集成验证
@@ -354,7 +342,10 @@ jupyter notebook
 
 ### Q4: 数据文件不存在
 
-运行 Step 3 生成模拟数据。
+运行模拟数据生成脚本:
+```cmd
+python scripts/generate_mock_data.py
+```
 
 ### Q5: 模型文件不存在
 
