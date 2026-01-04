@@ -134,7 +134,7 @@ Models are saved to `~/.algvex/models/qlib_alpha/`:
 
 ```bash
 # Download and convert Binance data to Parquet format
-python scripts/prepare_crypto_data.py --instruments btcusdt ethusdt --freq 1h
+python scripts/prepare_crypto_data.py --trading-pairs BTC-USDT ETH-USDT --interval 1h
 ```
 
 Data is stored in `~/.algvex/data/1h/`:
