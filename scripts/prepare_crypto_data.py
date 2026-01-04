@@ -1,440 +1,179 @@
 """
-加密货币数据准备脚本 (v10.0.6)
+加密货币数据准备脚本 (v10.1.0) - 官方数据源版本
 
-从 Binance 获取历史 K 线数据，输出为 Parquet 格式。
+使用 Binance 官方数据源 (data.binance.vision) 下载历史 K 线数据。
+相比 REST API 方式，速度快 10-100 倍，无 API 限流，有校验保证数据完整性。
 
 输出目录: ~/.algvex/data/{freq}/ (可通过 ALGVEX_DATA_DIR 环境变量自定义)
 输出文件: {instrument}.parquet
 
 用法:
+    pip install binance-historical-data
     python scripts/prepare_crypto_data.py --trading-pairs BTC-USDT ETH-USDT --interval 1h
 
 环境变量:
     ALGVEX_DATA_DIR: 自定义数据目录 (默认 ~/.algvex/data)
     HTTPS_PROXY: 代理服务器 (如 http://127.0.0.1:7890)
 
-Windows 兼容性:
-    - 自动检测 Windows 并设置正确的事件循环策略
-    - 如果 aiohttp 失败，会自动回退到同步模式 (requests)
-
-网络问题排查:
-    - 中国用户: 需要代理，设置 HTTPS_PROXY 环境变量
-    - 美国用户: 可以尝试 --api-base https://api.binance.us
-    - 网络不稳定: 脚本会自动重试 3 次
+数据源: https://data.binance.vision/
 """
 
-import json
 import os
 import sys
-import asyncio
+import json
 import argparse
-import time
+import tempfile
+import shutil
 from pathlib import Path
-from datetime import datetime, timezone
-from typing import Dict, Optional, Tuple
+from datetime import date, datetime, timezone
+from typing import List, Dict, Optional
 
 import pandas as pd
 
-# Windows 兼容性修复
-if sys.platform == "win32":
-    # Windows 上使用 SelectorEventLoop 以兼容 aiohttp
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+# ============================================================================
+# 常量定义
+# ============================================================================
+
+# 支持的时间间隔
+SUPPORTED_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]
+
+# CSV 列名映射 (Binance 官方格式)
+KLINE_COLUMNS = [
+    "open_time", "open", "high", "low", "close", "volume",
+    "close_time", "quote_volume", "trades", "taker_buy_base",
+    "taker_buy_quote", "ignore"
+]
 
 
 # ============================================================================
-# 错误码定义
+# 工具函数
 # ============================================================================
 
-class BinanceError:
-    """Binance API 错误码及其含义"""
-
-    ERROR_MESSAGES = {
-        400: "请求参数错误，请检查交易对格式 (如 BTC-USDT)",
-        403: "访问被拒绝。可能原因:\n"
-             "   - 您的 IP 所在地区被 Binance 限制 (中国大陆、美国等)\n"
-             "   - 请设置代理: export HTTPS_PROXY=http://127.0.0.1:7890",
-        418: "您的 IP 已被 Binance 临时封禁 (请求过于频繁)，请等待几分钟后重试",
-        429: "请求频率过高，触发了 API 限流。请稍等后重试",
-        451: "您所在的地区无法使用 Binance 服务",
-        500: "Binance 服务器内部错误，请稍后重试",
-        502: "Binance 网关错误，请稍后重试",
-        503: "Binance 服务暂时不可用，请稍后重试",
-    }
-
-    @classmethod
-    def get_message(cls, status_code: int) -> str:
-        """获取错误码对应的中文说明"""
-        return cls.ERROR_MESSAGES.get(status_code, f"未知错误 (HTTP {status_code})")
+def trading_pair_to_symbol(trading_pair: str) -> str:
+    """将交易对转换为 Binance symbol: BTC-USDT -> BTCUSDT"""
+    return trading_pair.replace("-", "").upper()
 
 
-# ============================================================================
-# 依赖检查
-# ============================================================================
+def trading_pair_to_instrument(trading_pair: str) -> str:
+    """将交易对转换为 instrument 名称: BTC-USDT -> btcusdt"""
+    return trading_pair.replace("-", "").lower()
 
-def check_dependencies() -> Tuple[bool, bool]:
-    """
-    检查必要的依赖是否已安装
 
-    Returns
-    -------
-    Tuple[bool, bool]
-        (requests_available, aiohttp_available)
-    """
-    requests_available = False
-    aiohttp_available = False
+def get_default_data_dir() -> Path:
+    """获取默认数据目录"""
+    return Path(os.environ.get("ALGVEX_DATA_DIR", Path.home() / ".algvex" / "data"))
 
+
+def check_binance_historical_data() -> bool:
+    """检查 binance-historical-data 包是否已安装"""
     try:
-        import requests  # noqa: F401
-        requests_available = True
-    except ImportError:
-        pass
-
-    try:
-        import aiohttp  # noqa: F401
-        aiohttp_available = True
-    except ImportError:
-        pass
-
-    return requests_available, aiohttp_available
-
-
-def check_pyarrow() -> bool:
-    """检查 pyarrow 是否可用"""
-    try:
-        import pyarrow  # noqa: F401
+        from binance_historical_data import BinanceDataDumper
         return True
     except ImportError:
         return False
 
 
 # ============================================================================
-# 同步版本 (使用 requests)
+# 数据下载 (使用官方包)
 # ============================================================================
 
-def fetch_binance_klines_sync(
-    trading_pair: str,
+def download_with_official_package(
+    symbols: List[str],
     interval: str,
-    start_time: int,
-    end_time: int,
-    api_base: str = "https://api.binance.com",
-    proxy: Optional[str] = None,
-    max_retries: int = 3,
-) -> pd.DataFrame:
+    start_date: date,
+    end_date: date,
+    temp_dir: Path,
+) -> Dict[str, Path]:
     """
-    从 Binance API 获取历史 K 线数据 (同步版本)
-
-    Parameters
-    ----------
-    trading_pair : str
-        交易对，如 "BTC-USDT"
-    interval : str
-        K 线间隔，如 "1h", "1d"
-    start_time : int
-        开始时间戳 (毫秒)
-    end_time : int
-        结束时间戳 (毫秒)
-    api_base : str
-        API 基础 URL
-    proxy : str, optional
-        代理服务器地址
-    max_retries : int
-        最大重试次数
+    使用 binance-historical-data 官方包下载数据
 
     Returns
     -------
-    pd.DataFrame
-        K 线数据
+    Dict[str, Path]
+        symbol -> 数据目录路径
     """
-    import requests
-    from requests.exceptions import RequestException, Timeout, ConnectionError as ReqConnectionError
+    from binance_historical_data import BinanceDataDumper
 
-    symbol = trading_pair.replace("-", "")
-    url = f"{api_base}/api/v3/klines"
+    print(f"\n📥 使用官方数据源下载 (data.binance.vision)")
+    print(f"   时间范围: {start_date} ~ {end_date}")
+    print(f"   交易对: {', '.join(symbols)}")
+    print(f"   间隔: {interval}")
+    print()
 
-    all_klines = []
-    current_start = start_time
-    consecutive_errors = 0
+    # 创建下载器
+    dumper = BinanceDataDumper(
+        path_dir_where_to_dump=str(temp_dir),
+        asset_class="spot",
+        data_type="klines",
+        data_frequency=interval,
+    )
 
-    # 配置代理
-    proxies = None
-    if proxy:
-        proxies = {"http": proxy, "https": proxy}
-        print(f"  Using proxy: {proxy}")
+    # 下载数据
+    dumper.dump_data(
+        tickers=symbols,
+        date_start=start_date,
+        date_end=end_date,
+        is_to_update_existing=False,
+    )
 
-    while current_start < end_time:
-        params = {
-            "symbol": symbol,
-            "interval": interval,
-            "startTime": current_start,
-            "endTime": end_time,
-            "limit": 1000,
-        }
-
-        # 重试逻辑
-        for retry in range(max_retries):
-            try:
-                resp = requests.get(
-                    url,
-                    params=params,
-                    timeout=30,
-                    proxies=proxies
-                )
-
-                if resp.status_code == 200:
-                    klines = resp.json()
-                    if not klines:
-                        # 没有更多数据
-                        return _convert_klines_to_df(all_klines)
-
-                    all_klines.extend(klines)
-                    current_start = klines[-1][0] + 1
-                    consecutive_errors = 0
-                    print(f"  Fetched {len(all_klines)} klines for {trading_pair}...")
-
-                    # 避免 API 限流
-                    time.sleep(0.1)
-                    break
-
-                elif resp.status_code == 429:
-                    # 速率限制，等待更长时间
-                    wait_time = 2 ** (retry + 2)  # 4, 8, 16 秒
-                    print(f"  Rate limited, waiting {wait_time}s before retry...")
-                    time.sleep(wait_time)
-                    continue
-
-                else:
-                    error_msg = BinanceError.get_message(resp.status_code)
-                    print(f"  Error: {error_msg}")
-
-                    # 403/451 是地区限制，重试无意义
-                    if resp.status_code in (403, 451):
-                        return pd.DataFrame()
-
-                    # 其他错误，重试
-                    if retry < max_retries - 1:
-                        wait_time = 2 ** retry  # 1, 2, 4 秒
-                        print(f"  Retrying in {wait_time}s... ({retry + 1}/{max_retries})")
-                        time.sleep(wait_time)
-                    continue
-
-            except Timeout:
-                print(f"  Request timeout, retrying... ({retry + 1}/{max_retries})")
-                if retry < max_retries - 1:
-                    time.sleep(2 ** retry)
-                continue
-
-            except ReqConnectionError as e:
-                print(f"  Connection error: {e}")
-                if "Connection refused" in str(e):
-                    print("  💡 提示: 请检查网络连接或代理设置")
-                if retry < max_retries - 1:
-                    print(f"  Retrying in {2 ** retry}s... ({retry + 1}/{max_retries})")
-                    time.sleep(2 ** retry)
-                continue
-
-            except RequestException as e:
-                print(f"  Request error: {e}")
-                consecutive_errors += 1
-                if consecutive_errors >= 3:
-                    print("  Too many consecutive errors, stopping.")
-                    return _convert_klines_to_df(all_klines)
-                if retry < max_retries - 1:
-                    time.sleep(2 ** retry)
-                continue
+    # 返回数据目录
+    result = {}
+    for symbol in symbols:
+        data_dir = temp_dir / "spot" / "klines" / symbol / interval
+        if data_dir.exists():
+            result[symbol] = data_dir
         else:
-            # 所有重试都失败了
-            print(f"  Failed after {max_retries} retries, stopping.")
-            break
+            print(f"   ⚠️ {symbol} 数据目录不存在")
 
-    return _convert_klines_to_df(all_klines)
+    return result
 
 
 # ============================================================================
-# 异步版本 (使用 aiohttp)
+# 数据转换
 # ============================================================================
 
-async def fetch_binance_klines_async(
-    trading_pair: str,
-    interval: str,
-    start_time: int,
-    end_time: int,
-    api_base: str = "https://api.binance.com",
-    proxy: Optional[str] = None,
-    max_retries: int = 3,
-) -> pd.DataFrame:
+def load_csv_files(data_dir: Path) -> pd.DataFrame:
     """
-    从 Binance API 获取历史 K 线数据 (异步版本)
+    加载目录下所有 CSV 文件并合并
 
     Parameters
     ----------
-    trading_pair : str
-        交易对，如 "BTC-USDT"
-    interval : str
-        K 线间隔，如 "1h", "1d"
-    start_time : int
-        开始时间戳 (毫秒)
-    end_time : int
-        结束时间戳 (毫秒)
-    api_base : str
-        API 基础 URL
-    proxy : str, optional
-        代理服务器地址
-    max_retries : int
-        最大重试次数
+    data_dir : Path
+        包含 CSV 文件的目录
 
     Returns
     -------
     pd.DataFrame
-        K 线数据
+        合并后的数据
     """
-    import aiohttp
-    from aiohttp import ClientTimeout, ClientError
+    all_files = sorted(data_dir.glob("*.csv"))
 
-    symbol = trading_pair.replace("-", "")
-    url = f"{api_base}/api/v3/klines"
-
-    all_klines = []
-    current_start = start_time
-
-    # 设置超时
-    timeout = ClientTimeout(total=30)
-
-    if proxy:
-        print(f"  Using proxy: {proxy}")
-
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        while current_start < end_time:
-            params = {
-                "symbol": symbol,
-                "interval": interval,
-                "startTime": current_start,
-                "endTime": end_time,
-                "limit": 1000,
-            }
-
-            for retry in range(max_retries):
-                try:
-                    async with session.get(url, params=params, proxy=proxy) as resp:
-                        if resp.status == 200:
-                            klines = await resp.json()
-                            if not klines:
-                                return _convert_klines_to_df(all_klines)
-
-                            all_klines.extend(klines)
-                            current_start = klines[-1][0] + 1
-                            print(f"  Fetched {len(all_klines)} klines for {trading_pair}...")
-
-                            # 避免 API 限流
-                            await asyncio.sleep(0.1)
-                            break
-
-                        elif resp.status == 429:
-                            wait_time = 2 ** (retry + 2)
-                            print(f"  Rate limited, waiting {wait_time}s...")
-                            await asyncio.sleep(wait_time)
-                            continue
-
-                        else:
-                            error_msg = BinanceError.get_message(resp.status)
-                            print(f"  Error: {error_msg}")
-
-                            if resp.status in (403, 451):
-                                return pd.DataFrame()
-
-                            if retry < max_retries - 1:
-                                await asyncio.sleep(2 ** retry)
-                            continue
-
-                except asyncio.TimeoutError:
-                    print(f"  Request timeout, retrying... ({retry + 1}/{max_retries})")
-                    if retry < max_retries - 1:
-                        await asyncio.sleep(2 ** retry)
-                    continue
-
-                except ClientError as e:
-                    print(f"  Client error: {e}")
-                    if retry < max_retries - 1:
-                        await asyncio.sleep(2 ** retry)
-                    continue
-
-            else:
-                print(f"  Failed after {max_retries} retries, stopping.")
-                break
-
-    return _convert_klines_to_df(all_klines)
-
-
-# ============================================================================
-# 统一入口
-# ============================================================================
-
-async def fetch_binance_klines(
-    trading_pair: str,
-    interval: str,
-    start_time: int,
-    end_time: int,
-    use_sync: bool = False,
-    api_base: str = "https://api.binance.com",
-    proxy: Optional[str] = None,
-) -> pd.DataFrame:
-    """
-    从 Binance API 获取历史 K 线数据 (自动选择同步/异步)
-
-    如果 use_sync=True 或 aiohttp 不可用/失败，自动回退到同步模式。
-    """
-    if use_sync:
-        return fetch_binance_klines_sync(
-            trading_pair, interval, start_time, end_time,
-            api_base=api_base, proxy=proxy
-        )
-
-    try:
-        return await fetch_binance_klines_async(
-            trading_pair, interval, start_time, end_time,
-            api_base=api_base, proxy=proxy
-        )
-    except Exception as e:
-        print(f"  Async fetch failed ({e}), falling back to sync mode...")
-        return fetch_binance_klines_sync(
-            trading_pair, interval, start_time, end_time,
-            api_base=api_base, proxy=proxy
-        )
-
-
-# ============================================================================
-# 数据转换工具
-# ============================================================================
-
-def _convert_klines_to_df(klines: list) -> pd.DataFrame:
-    """将 K 线列表转换为 DataFrame"""
-    if not klines:
+    if not all_files:
         return pd.DataFrame()
 
-    df = pd.DataFrame(klines, columns=[
-        "timestamp", "open", "high", "low", "close", "volume",
-        "close_time", "quote_volume", "trades", "taker_buy_base",
-        "taker_buy_quote", "ignore"
-    ])
+    dfs = []
+    for f in all_files:
+        try:
+            df = pd.read_csv(f, header=None, names=KLINE_COLUMNS)
+            dfs.append(df)
+        except Exception as e:
+            print(f"   ⚠️ 读取 {f.name} 失败: {e}")
 
-    for col in ["open", "high", "low", "close", "volume", "quote_volume"]:
-        df[col] = df[col].astype(float)
+    if not dfs:
+        return pd.DataFrame()
 
-    return df
+    # 合并并去重
+    combined = pd.concat(dfs, ignore_index=True)
+    combined = combined.drop_duplicates(subset=["open_time"])
+    combined = combined.sort_values("open_time")
 
-
-def detect_timestamp_unit(timestamp: int) -> str:
-    """自动检测时间戳单位 (秒/毫秒)"""
-    if timestamp > 1e12:
-        return "ms"
-    return "s"
+    return combined
 
 
-def convert_to_parquet_format(
-    df: pd.DataFrame,
-    trading_pair: str,
-) -> pd.DataFrame:
+def convert_to_parquet_format(df: pd.DataFrame) -> pd.DataFrame:
     """
-    将 Binance K 线数据转换为 Parquet 格式
+    将 Binance CSV 格式转换为 AlgVex Parquet 格式
 
     输出格式:
     - Index: datetime (UTC)
@@ -443,12 +182,20 @@ def convert_to_parquet_format(
     if df.empty:
         return pd.DataFrame()
 
+    # 检测时间戳单位 (2025年起 Binance 使用微秒)
+    sample_ts = df["open_time"].iloc[0]
+    if sample_ts > 1e15:  # 微秒
+        unit = "us"
+    elif sample_ts > 1e12:  # 毫秒
+        unit = "ms"
+    else:  # 秒
+        unit = "s"
+
     # 转换时间戳
-    unit = detect_timestamp_unit(df["timestamp"].iloc[0])
-    df["datetime"] = pd.to_datetime(df["timestamp"], unit=unit, utc=True)
+    df["datetime"] = pd.to_datetime(df["open_time"], unit=unit, utc=True)
     df = df.set_index("datetime")
 
-    # 只保留需要的列，使用简单列名
+    # 只保留需要的列
     result = pd.DataFrame({
         "open": df["open"].astype(float),
         "high": df["high"].astype(float),
@@ -464,30 +211,32 @@ def convert_to_parquet_format(
 def save_to_parquet(
     data: Dict[str, pd.DataFrame],
     output_dir: Path,
-    freq: str,
-):
+    interval: str,
+) -> None:
     """
     保存为 Parquet 格式
 
     目录结构:
     output_dir/
-    └── {freq}/
+    └── {interval}/
         ├── btcusdt.parquet
         ├── ethusdt.parquet
         └── metadata.json
     """
-    freq_dir = output_dir / freq
+    freq_dir = output_dir / interval
     freq_dir.mkdir(parents=True, exist_ok=True)
 
     metadata = {
-        "freq": freq,
+        "freq": interval,
         "timezone": "UTC",
+        "source": "data.binance.vision",
+        "version": "v10.1.0",
         "instruments": [],
         "columns": ["open", "high", "low", "close", "volume", "quote_volume"],
     }
 
-    for pair, df in data.items():
-        instrument = pair.lower().replace("-", "")
+    for symbol, df in data.items():
+        instrument = symbol.lower()
         file_path = freq_dir / f"{instrument}.parquet"
 
         # 保存 Parquet
@@ -496,258 +245,221 @@ def save_to_parquet(
         # 更新元数据
         metadata["instruments"].append({
             "name": instrument,
+            "symbol": symbol,
             "start": df.index.min().isoformat(),
             "end": df.index.max().isoformat(),
             "rows": len(df),
-            "gaps": int(df["close"].isna().sum()),
         })
-        print(f"  Saved {instrument}: {len(df)} rows")
+        print(f"   ✅ {instrument}.parquet: {len(df):,} 行")
 
     # 保存元数据
     with open(freq_dir / "metadata.json", "w") as f:
-        json.dump(metadata, f, indent=2)
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
 
-    print(f"Data saved to {freq_dir}")
+    print(f"\n📁 数据已保存到: {freq_dir}")
 
 
 # ============================================================================
 # 主函数
 # ============================================================================
 
-def get_default_data_dir() -> str:
-    """获取默认数据目录，支持环境变量自定义"""
-    return os.environ.get("ALGVEX_DATA_DIR", "~/.algvex/data")
-
-
-def print_troubleshooting_tips(has_proxy: bool, is_china: bool = False):
-    """打印故障排除提示"""
-    print("\n" + "=" * 60)
-    print("💡 数据下载故障排除指南")
-    print("=" * 60)
-
-    print("\n1. 网络连接问题:")
-    print("   - 检查您的网络连接是否正常")
-    print("   - 尝试访问 https://api.binance.com/api/v3/ping")
-
-    print("\n2. 地区限制问题:")
-    print("   - 中国大陆用户需要使用代理")
-    print("   - 美国用户可以使用 Binance.US:")
-    print("     python scripts/prepare_crypto_data.py --api-base https://api.binance.us")
-
-    if not has_proxy:
-        print("\n3. 代理设置:")
-        print("   方法 1 - 环境变量:")
-        print("     export HTTPS_PROXY=http://127.0.0.1:7890")
-        print("   方法 2 - 命令行参数:")
-        print("     python scripts/prepare_crypto_data.py --proxy http://127.0.0.1:7890")
-
-    print("\n4. 其他解决方案:")
-    print("   - 使用 --sync 标志强制同步模式:")
-    print("     python scripts/prepare_crypto_data.py --sync")
-    print("   - 使用模拟数据进行测试:")
-    print("     python scripts/generate_mock_data.py")
-
-    print("\n" + "=" * 60)
-
-
-async def main():
+def main():
     parser = argparse.ArgumentParser(
-        description="Prepare crypto data from Binance (Parquet format)",
+        description="从 Binance 官方数据源下载历史 K 线数据",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
+示例:
   # 基本用法
   python scripts/prepare_crypto_data.py --trading-pairs BTC-USDT ETH-USDT
 
-  # 使用代理 (中国用户)
-  python scripts/prepare_crypto_data.py --proxy http://127.0.0.1:7890
-
-  # 美国用户使用 Binance.US
-  python scripts/prepare_crypto_data.py --api-base https://api.binance.us
+  # 指定时间范围
+  python scripts/prepare_crypto_data.py --start-date 2023-01-01 --end-date 2024-12-31
 
   # 自定义输出目录
   python scripts/prepare_crypto_data.py --output-dir /path/to/data
 
-Environment Variables:
-  ALGVEX_DATA_DIR  - Custom data directory (default: ~/.algvex/data)
-  HTTPS_PROXY      - Proxy server for network requests
+环境变量:
+  ALGVEX_DATA_DIR  - 自定义数据目录 (默认: ~/.algvex/data)
+  HTTPS_PROXY      - 代理服务器地址
+
+数据源: https://data.binance.vision/
         """
     )
+
     parser.add_argument(
         "--trading-pairs",
         type=str,
         nargs="+",
         default=["BTC-USDT", "ETH-USDT"],
-        help="Trading pairs to fetch (default: BTC-USDT ETH-USDT)",
+        help="交易对列表 (默认: BTC-USDT ETH-USDT)",
     )
     parser.add_argument(
         "--interval",
         type=str,
         default="1h",
-        help="Candle interval: 1m, 5m, 15m, 1h, 4h, 1d (default: 1h)",
+        choices=SUPPORTED_INTERVALS,
+        help="K线间隔 (默认: 1h)",
     )
     parser.add_argument(
         "--start-date",
         type=str,
         default="2023-01-01",
-        help="Start date YYYY-MM-DD (default: 2023-01-01)",
+        help="开始日期 YYYY-MM-DD (默认: 2023-01-01)",
     )
     parser.add_argument(
         "--end-date",
         type=str,
         default="2024-12-31",
-        help="End date YYYY-MM-DD (default: 2024-12-31)",
+        help="结束日期 YYYY-MM-DD (默认: 2024-12-31)",
     )
     parser.add_argument(
         "--output-dir",
         type=str,
-        default=None,  # 将在运行时从环境变量获取默认值
-        help="Output directory (default: ~/.algvex/data or ALGVEX_DATA_DIR)",
-    )
-    parser.add_argument(
-        "--sync",
-        action="store_true",
-        help="Force synchronous requests (recommended if async fails)",
-    )
-    parser.add_argument(
-        "--proxy",
-        type=str,
         default=None,
-        help="Proxy server URL (e.g., http://127.0.0.1:7890)",
+        help="输出目录 (默认: ~/.algvex/data 或 ALGVEX_DATA_DIR)",
     )
-    parser.add_argument(
-        "--api-base",
-        type=str,
-        default="https://api.binance.com",
-        help="Binance API base URL (default: https://api.binance.com)",
-    )
+
+    # 兼容旧参数 (忽略)
+    parser.add_argument("--sync", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--proxy", type=str, help=argparse.SUPPRESS)
+    parser.add_argument("--api-base", type=str, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
 
     # -------------------------------------------------------------------------
-    # 依赖检查
+    # 检查依赖
     # -------------------------------------------------------------------------
-    print("Checking dependencies...")
+    print("=" * 60)
+    print("AlgVex 数据准备工具 v10.1.0 (官方数据源)")
+    print("=" * 60)
 
-    requests_available, aiohttp_available = check_dependencies()
-
-    if not requests_available and not aiohttp_available:
-        print("ERROR: Neither 'requests' nor 'aiohttp' is installed!")
-        print("Please install at least one:")
-        print("  pip install requests")
-        print("  pip install aiohttp")
+    if not check_binance_historical_data():
+        print("\n❌ 缺少依赖: binance-historical-data")
+        print("\n请安装:")
+        print("  pip install binance-historical-data")
+        print("\n或使用模拟数据:")
+        print("  python scripts/generate_mock_data.py")
         sys.exit(1)
 
-    if not check_pyarrow():
-        print("ERROR: 'pyarrow' is not installed!")
-        print("Please install it:")
+    try:
+        import pyarrow
+    except ImportError:
+        print("\n❌ 缺少依赖: pyarrow")
         print("  pip install pyarrow")
         sys.exit(1)
 
     # -------------------------------------------------------------------------
-    # 确定是否使用同步模式
+    # 检查代理
     # -------------------------------------------------------------------------
-    use_sync = args.sync
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    if proxy:
+        print(f"\n🌐 代理已配置: {proxy}")
+    else:
+        print("\n🌐 未配置代理 (如遇下载问题，请设置 HTTPS_PROXY)")
 
-    if not aiohttp_available:
-        print("Note: aiohttp not available, using synchronous mode")
-        use_sync = True
-    elif sys.platform == "win32" and not use_sync:
-        print("Note: Windows detected. If download fails, try: --sync")
-
-    if not requests_available and use_sync:
-        print("ERROR: --sync flag requires 'requests' package!")
-        print("  pip install requests")
+    # -------------------------------------------------------------------------
+    # 解析参数
+    # -------------------------------------------------------------------------
+    try:
+        start_date = datetime.strptime(args.start_date, "%Y-%m-%d").date()
+        end_date = datetime.strptime(args.end_date, "%Y-%m-%d").date()
+    except ValueError as e:
+        print(f"\n❌ 日期格式错误: {e}")
+        print("   请使用 YYYY-MM-DD 格式")
         sys.exit(1)
 
-    # -------------------------------------------------------------------------
-    # 代理设置
-    # -------------------------------------------------------------------------
-    proxy = args.proxy
-    if not proxy:
-        # 检查环境变量
-        proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    if start_date >= end_date:
+        print("\n❌ start-date 必须早于 end-date")
+        sys.exit(1)
 
-    # -------------------------------------------------------------------------
     # 输出目录
-    # -------------------------------------------------------------------------
     if args.output_dir:
         output_dir = Path(args.output_dir).expanduser()
     else:
-        output_dir = Path(get_default_data_dir()).expanduser()
+        output_dir = get_default_data_dir()
 
-    print(f"Output directory: {output_dir}")
+    # 转换交易对为 Binance symbol
+    symbols = [trading_pair_to_symbol(p) for p in args.trading_pairs]
+
+    print(f"\n📊 配置:")
+    print(f"   交易对: {', '.join(args.trading_pairs)}")
+    print(f"   Symbols: {', '.join(symbols)}")
+    print(f"   间隔: {args.interval}")
+    print(f"   时间范围: {start_date} ~ {end_date}")
+    print(f"   输出目录: {output_dir}")
 
     # -------------------------------------------------------------------------
-    # 转换时间
+    # 下载数据
     # -------------------------------------------------------------------------
-    try:
-        start_ts = int(datetime.strptime(args.start_date, "%Y-%m-%d")
-                       .replace(tzinfo=timezone.utc).timestamp() * 1000)
-        end_ts = int(datetime.strptime(args.end_date, "%Y-%m-%d")
-                     .replace(tzinfo=timezone.utc).timestamp() * 1000)
-    except ValueError as e:
-        print(f"ERROR: Invalid date format: {e}")
-        print("Please use YYYY-MM-DD format (e.g., 2023-01-01)")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+
+        try:
+            data_dirs = download_with_official_package(
+                symbols=symbols,
+                interval=args.interval,
+                start_date=start_date,
+                end_date=end_date,
+                temp_dir=temp_path,
+            )
+        except Exception as e:
+            print(f"\n❌ 下载失败: {e}")
+            print("\n💡 故障排除:")
+            print("   1. 检查网络连接")
+            print("   2. 如果在中国，设置代理: export HTTPS_PROXY=http://127.0.0.1:7890")
+            print("   3. 使用模拟数据: python scripts/generate_mock_data.py")
+            sys.exit(1)
+
+        if not data_dirs:
+            print("\n❌ 未下载到任何数据")
+            sys.exit(1)
+
+        # ---------------------------------------------------------------------
+        # 转换格式
+        # ---------------------------------------------------------------------
+        print("\n🔄 转换为 Parquet 格式...")
+
+        converted_data = {}
+        for symbol, data_dir in data_dirs.items():
+            print(f"   处理 {symbol}...")
+
+            # 加载 CSV
+            raw_df = load_csv_files(data_dir)
+            if raw_df.empty:
+                print(f"   ⚠️ {symbol} 无数据")
+                continue
+
+            # 转换格式
+            parquet_df = convert_to_parquet_format(raw_df)
+
+            # 过滤时间范围
+            start_ts = pd.Timestamp(start_date, tz="UTC")
+            end_ts = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)
+            parquet_df = parquet_df[(parquet_df.index >= start_ts) & (parquet_df.index < end_ts)]
+
+            if not parquet_df.empty:
+                converted_data[symbol] = parquet_df
+
+    if not converted_data:
+        print("\n❌ 转换后无有效数据")
         sys.exit(1)
 
-    if start_ts >= end_ts:
-        print("ERROR: start-date must be before end-date")
-        sys.exit(1)
+    # -------------------------------------------------------------------------
+    # 保存数据
+    # -------------------------------------------------------------------------
+    print("\n💾 保存数据...")
+    save_to_parquet(converted_data, output_dir, args.interval)
 
     # -------------------------------------------------------------------------
-    # 获取数据
+    # 完成
     # -------------------------------------------------------------------------
-    print(f"\nFetching data from {args.start_date} to {args.end_date}")
-    print(f"API: {args.api_base}")
-    print(f"Interval: {args.interval}")
-    print(f"Trading pairs: {', '.join(args.trading_pairs)}")
-    print()
-
-    all_data = {}
-    failed_pairs = []
-
-    for pair in args.trading_pairs:
-        print(f"Fetching {pair}...")
-        df = await fetch_binance_klines(
-            pair, args.interval, start_ts, end_ts,
-            use_sync=use_sync,
-            api_base=args.api_base,
-            proxy=proxy
-        )
-
-        if not df.empty:
-            parquet_df = convert_to_parquet_format(df, pair)
-            all_data[pair] = parquet_df
-            print(f"  Total: {len(parquet_df)} records\n")
-        else:
-            failed_pairs.append(pair)
-            print(f"  No data fetched for {pair}\n")
-
-    # -------------------------------------------------------------------------
-    # 结果处理
-    # -------------------------------------------------------------------------
-    if not all_data:
-        print("ERROR: No data fetched for any trading pair!")
-        print_troubleshooting_tips(has_proxy=bool(proxy))
-        sys.exit(1)
-
-    if failed_pairs:
-        print(f"Warning: Failed to fetch data for: {', '.join(failed_pairs)}")
-
-    # 保存为 Parquet
-    save_to_parquet(all_data, output_dir, args.interval)
-
     print("\n" + "=" * 60)
-    print("Data preparation complete!")
+    print("✅ 数据准备完成!")
     print("=" * 60)
-    print(f"Successfully downloaded: {', '.join(all_data.keys())}")
-    print(f"Data location: {output_dir / args.interval}")
-
-    if failed_pairs:
-        print(f"\nFailed pairs: {', '.join(failed_pairs)}")
-        print("Use --proxy option if you're in a restricted region.")
+    print(f"   下载: {', '.join(converted_data.keys())}")
+    print(f"   位置: {output_dir / args.interval}")
+    print(f"   数据源: data.binance.vision (官方)")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
