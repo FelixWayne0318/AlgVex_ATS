@@ -23,8 +23,8 @@ lookback_bars: 100
 # 三重屏障配置 (PositionExecutor 自动管理)
 stop_loss: 0.02            # 2% 止损
 take_profit: 0.03          # 3% 止盈
-time_limit: 3600           # 1小时持仓限制
+time_limit: 86400          # 24小时持仓限制 (与回测一致)
 
 # 执行配置
-cooldown_interval: 60      # 60秒冷却
+cooldown_interval: 3600    # 1小时冷却 (与回测一致)
 max_executors_per_side: 1  # 每方向最多1个执行器
