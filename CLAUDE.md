@@ -24,7 +24,8 @@ AlgVex_ATS/
 ├── CLAUDE.md                    # This file - AI assistant guide
 ├── README.md                    # Project overview (Chinese)
 ├── requirements_tutorial.txt    # Tutorial dependencies
-├── AlgVex_v10_教程_详细版.ipynb  # Main tutorial notebook
+├── AlgVex_v10_教程_详细版.ipynb         # Main tutorial notebook (v10)
+├── AlgVex_加密货币完整教程_详细版.ipynb  # Complete crypto tutorial
 │
 ├── scripts/                     # Core trading scripts
 │   ├── unified_features.py      # Feature computation (shared across all pipelines)
