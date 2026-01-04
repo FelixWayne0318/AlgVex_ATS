@@ -1,6 +1,6 @@
 # CLAUDE.md - AI Assistant Guide for AlgVex ATS
 
-> **Version**: v10.0.4
+> **Version**: v10.2.0
 > **Last Updated**: 2026-01-04
 
 ## Project Overview
