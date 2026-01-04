@@ -1,4 +1,4 @@
-# AlgVex v10.0.4 Windows 本地部署指南
+# AlgVex v10.0.6 Windows 本地部署指南
 
 > **目标**: 在 Windows 本地电脑上从零开始部署 AlgVex 并运行教程
 
@@ -8,7 +8,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    AlgVex v10.0.4 依赖结构                    │
+│                    AlgVex v10.0.6 依赖结构                    │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │  【基础层】 numpy, pandas, lightgbm, pyarrow                │
@@ -98,7 +98,7 @@ venv\Scripts\activate
 
 ```cmd
 python -m pip install --upgrade pip
-python -m pip install numpy pandas pyarrow lightgbm scikit-learn plotly jupyter notebook
+python -m pip install numpy pandas pyarrow lightgbm scikit-learn plotly jupyter notebook requests
 ```
 
 > **注意**: Windows 上必须使用 `python -m pip` 而不是直接 `pip`，否则升级 pip 时会报错。
@@ -119,69 +119,67 @@ mkdir $env:USERPROFILE\.algvex\models\qlib_alpha -Force
 
 ---
 
-## 3. 准备数据
+## 3. 自定义目录配置
 
-### 方法 A: 生成模拟数据 (推荐新手)
+AlgVex 支持通过环境变量自定义数据和模型存储位置。
 
-项目已包含模拟数据生成脚本，直接运行:
+### 环境变量说明
+
+| 环境变量 | 默认值 | 说明 |
+|---------|--------|------|
+| `ALGVEX_DATA_DIR` | `~/.algvex/data` | 数据存储目录 |
+| `ALGVEX_MODEL_DIR` | `~/.algvex/models` | 模型存储目录 |
+| `HTTPS_PROXY` | 无 | 代理服务器 (中国用户需要) |
+
+### 设置方法
+
+**临时设置 (当前会话):**
+```cmd
+set ALGVEX_DATA_DIR=D:\AlgVex\data
+set ALGVEX_MODEL_DIR=D:\AlgVex\models
+```
+
+**永久设置 (系统环境变量):**
+1. 右键 "此电脑" → "属性" → "高级系统设置"
+2. 点击 "环境变量"
+3. 在 "用户变量" 中添加:
+   - 变量名: `ALGVEX_DATA_DIR`
+   - 变量值: `D:\AlgVex\data` (您选择的路径)
+
+### 示例: 将所有数据放到 D 盘
 
 ```cmd
-python scripts/generate_mock_data.py
-```
+set ALGVEX_DATA_DIR=D:\AlgVex\data
+set ALGVEX_MODEL_DIR=D:\AlgVex\models
+mkdir D:\AlgVex\data\1h
+mkdir D:\AlgVex\models\qlib_alpha
 
-输出示例:
-```
-==================================================
-AlgVex v10.0.4 - 模拟数据生成
-==================================================
-
-数据目录: C:\Users\xxx\.algvex\data\1h
-时间范围: 2023-01-01 ~ 2024-12-31
-数据点数: 17521 bars
-
-Created btcusdt.parquet: 17521 bars
-  - Price range: $15234.56 ~ $89012.34
-Created ethusdt.parquet: 17521 bars
-  - Price range: $1023.45 ~ $5678.90
-
-Data saved to: C:\Users\xxx\.algvex\data\1h
-Done!
-```
-
-### 方法 B: 获取真实数据
-
-```cmd
-pip install ccxt
-python scripts/prepare_crypto_data.py --trading-pairs BTC-USDT ETH-USDT --start-date 2023-01-01
+python scripts/generate_mock_data.py --output-dir D:\AlgVex\data
+python scripts/train_model.py --model-dir D:\AlgVex\models\qlib_alpha
 ```
 
 ---
 
-## 4. 训练模型
+## 4. 准备数据与训练模型
+
+> **详细步骤请参阅教程 Notebook**: `AlgVex_v10_教程_详细版.ipynb` 的 Part 2 和 Part 4
+
+### 快速开始 (推荐)
+
+使用模拟数据快速启动：
 
 ```cmd
-python scripts/train_model.py --instruments btcusdt ethusdt --train-start 2023-01-01 --train-end 2024-06-30
+python scripts/generate_mock_data.py
+python scripts/train_model.py --instruments btcusdt ethusdt
 ```
 
-训练完成后检查模型文件:
+### 获取真实数据
 
-**CMD:**
 ```cmd
-dir %USERPROFILE%\.algvex\models\qlib_alpha
+python scripts/prepare_crypto_data.py --trading-pairs BTC-USDT ETH-USDT
 ```
 
-**PowerShell:**
-```powershell
-dir $env:USERPROFILE\.algvex\models\qlib_alpha
-```
-
-应该看到:
-```
-lgb_model.txt        - LightGBM 模型
-normalizer.pkl       - 归一化参数
-feature_columns.pkl  - 特征列顺序
-metadata.json        - 训练元信息
-```
+**网络问题?** 参见下方 [常见问题 Q7-Q9](#10-常见问题)
 
 ---
 
@@ -235,7 +233,7 @@ jupyter notebook
 ```batch
 @echo off
 echo ========================================
-echo   AlgVex v10.0.4 启动脚本
+echo   AlgVex v10.0.6 启动脚本
 echo ========================================
 cd /d %USERPROFILE%\AlgVex_ATS
 call venv\Scripts\activate
@@ -287,15 +285,15 @@ python -c "
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
-print('✅ 基础依赖正常')
+print('基础依赖正常')
 
 import sys
 sys.path.insert(0, '.')
 from scripts.unified_features import compute_unified_features, FEATURE_COLUMNS
-print(f'✅ 统一特征模块正常 ({len(FEATURE_COLUMNS)} 个因子)')
+print(f'统一特征模块正常 ({len(FEATURE_COLUMNS)} 个因子)')
 
 from scripts.backtest_offline import BacktestConfig, run_backtest
-print('✅ 回测模块正常')
+print('回测模块正常')
 "
 ```
 
@@ -314,7 +312,7 @@ python scripts/verify_integration.py
 ├── AlgVex_ATS\                    # 项目代码
 │   ├── scripts\                   # 核心脚本 (不依赖 Hummingbot)
 │   │   ├── unified_features.py    # 59 因子计算
-│   │   ├── prepare_crypto_data.py # 数据准备
+│   │   ├── prepare_crypto_data.py # 数据准备 (v10.0.6 支持代理)
 │   │   ├── generate_mock_data.py  # 模拟数据生成
 │   │   ├── train_model.py         # 模型训练
 │   │   ├── backtest_offline.py    # 离线回测
@@ -329,7 +327,7 @@ python scripts/verify_integration.py
 │   ├── start_algvex.bat           # 快速启动脚本
 │   └── venv\                      # 虚拟环境
 │
-└── .algvex\                       # 数据和模型
+└── .algvex\                       # 数据和模型 (可通过环境变量自定义)
     ├── data\
     │   └── 1h\
     │       ├── btcusdt.parquet
@@ -381,12 +379,53 @@ python scripts/generate_mock_data.py
 
 ### Q5: 模型文件不存在
 
-运行 Step 4 训练模型。
+运行训练脚本:
+```cmd
+python scripts/train_model.py --instruments btcusdt ethusdt
+```
 
 ### Q6: ImportError: No module named 'hummingbot'
 
 这是正常的！基础教程不需要 Hummingbot。
 跳过 Controller 测试 Cell 即可。
+
+### Q7: 数据下载失败 (OSError / Windows 事件循环错误)
+
+这是 Windows 上 asyncio 与 aiohttp 的兼容性问题，使用 `--sync` 标志：
+
+```cmd
+python scripts/prepare_crypto_data.py --sync
+```
+
+### Q8: 数据下载失败 (403 Forbidden / 地区限制)
+
+中国大陆用户需要使用代理：
+
+**方法 1: 环境变量**
+```cmd
+set HTTPS_PROXY=http://127.0.0.1:7890
+python scripts/prepare_crypto_data.py
+```
+
+**方法 2: 命令行参数**
+```cmd
+python scripts/prepare_crypto_data.py --proxy http://127.0.0.1:7890
+```
+
+**方法 3: 使用 Binance.US (美国用户)**
+```cmd
+python scripts/prepare_crypto_data.py --api-base https://api.binance.us
+```
+
+### Q9: 数据下载失败 (网络超时)
+
+脚本会自动重试 3 次。如果仍然失败：
+
+1. 检查网络连接
+2. 使用模拟数据继续学习:
+   ```cmd
+   python scripts/generate_mock_data.py
+   ```
 
 ---
 
@@ -406,5 +445,5 @@ python scripts/generate_mock_data.py
 
 ---
 
-**版本**: v10.0.4
-**更新日期**: 2026-01-03
+**版本**: v10.0.6
+**更新日期**: 2026-01-04
