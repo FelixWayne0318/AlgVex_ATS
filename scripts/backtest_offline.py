@@ -1,5 +1,5 @@
 """
-离线回测脚本 (v10.0.0)
+离线回测脚本 (v10.0.5)
 
 与实盘使用完全相同的链路:
 OHLCV → unified_features → normalizer → booster → signal → 仿真
@@ -9,16 +9,25 @@ OHLCV → unified_features → normalizer → booster → signal → 仿真
 
 重要:
     - 使用已收盘bar生成信号 (与实盘一致)
-    - 严格特征对齐 (缺列直接FAIL)
+    - 严格特征对齐 (缺列直接FAIL, 列顺序不一致默认FAIL)
     - 支持手续费、滑点、止损止盈、时间限制、冷却
+    - 使用 Decimal 进行货币计算，与实盘保持一致
+
+时间对齐说明:
+    回测和实盘使用相同的时间视角:
+    - 在 bar[i] 收盘时刻，使用 bar[i] 的完整 OHLCV 数据计算特征
+    - 预测值 pred[i] 表示对 bar[i+1] 收益的预测
+    - 信号在 bar[i] 收盘后生成，在 bar[i+1] 开盘执行
+    - 实盘中 iloc[-2] 对应回测中的 bar[i]（已闭合K线）
 """
 
 import json
 import pickle
 import argparse
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List
+from decimal import Decimal, ROUND_HALF_UP
 
 import numpy as np
 import pandas as pd
@@ -41,14 +50,15 @@ except ImportError:
 
 @dataclass
 class BacktestConfig:
-    """回测配置 (与实盘 controller 配置一致)"""
-    signal_threshold: float = 0.005
-    stop_loss: float = 0.02
-    take_profit: float = 0.03
+    """回测配置 (与实盘 controller 配置一致，使用 Decimal 保证精度)"""
+    signal_threshold: Decimal = field(default_factory=lambda: Decimal("0.005"))
+    stop_loss: Decimal = field(default_factory=lambda: Decimal("0.02"))
+    take_profit: Decimal = field(default_factory=lambda: Decimal("0.03"))
     time_limit_bars: int = 24  # 最长持仓时间 (单位: bar数)
     cooldown_bars: int = 1  # 同一根bar不重复交易
-    fee_rate: float = 0.001  # 0.1% 手续费
-    slippage: float = 0.0005  # 0.05% 滑点
+    fee_rate: Decimal = field(default_factory=lambda: Decimal("0.001"))  # 0.1% 手续费
+    slippage: Decimal = field(default_factory=lambda: Decimal("0.0005"))  # 0.05% 滑点
+    strict_column_order: bool = True  # 严格检查特征列顺序
 
 
 @dataclass
@@ -93,13 +103,27 @@ def run_backtest(
     print(f"Loading model from {model_path}...")
     model, normalizer, feature_columns = load_model(model_path)
 
-    # 验证特征列 (v10.0.2: 更健壮的比较)
+    # 验证特征列 (v10.0.5: 严格模式默认开启)
     if set(feature_columns) != set(FEATURE_COLUMNS):
-        raise ValueError("Feature columns mismatch! Retrain model.")
+        raise ValueError(
+            f"Feature columns mismatch! "
+            f"Model has {len(feature_columns)} features, code has {len(FEATURE_COLUMNS)}. "
+            f"Please retrain model."
+        )
     if feature_columns != FEATURE_COLUMNS:
-        import warnings
-        warnings.warn("Feature column order differs from code, using model's order")
-        # 使用模型训练时的列顺序，不影响预测结果
+        if config.strict_column_order:
+            raise ValueError(
+                "Feature column order differs from code! "
+                "This may cause incorrect predictions. "
+                "Either retrain the model or set strict_column_order=False "
+                "(not recommended for production)."
+            )
+        else:
+            import warnings
+            warnings.warn(
+                "Feature column order differs from code, using model's order. "
+                "This is NOT recommended for production use."
+            )
 
     # 解析时间
     test_start_ts = pd.Timestamp(test_start, tz="UTC")
@@ -166,21 +190,52 @@ def simulate_trading(
     config: BacktestConfig,
     instrument: str,
 ) -> dict:
-    """仿真交易逻辑 (与实盘信号规则一致)"""
+    """
+    仿真交易逻辑 (与实盘信号规则一致)
+
+    时间对齐说明 (Time Alignment):
+    ================================
+    回测循环中的时间视角与实盘完全一致:
+
+    实盘流程:
+        1. bar[i] 收盘 (K线闭合)
+        2. 使用 bar[i] 的 OHLCV 计算特征 (iloc[-2] = 倒数第二根，即最新闭合K线)
+        3. 模型预测 bar[i+1] 的收益
+        4. 在 bar[i+1] 开盘时执行交易
+
+    回测流程:
+        1. 循环到 bar[i]
+        2. 使用 predictions[i] (基于 bar[i] 特征计算)
+        3. 在 bar[i+1] 的价格 (closes[i+1]) 判断止损止盈
+        4. 这与实盘的 iloc[-2] 逻辑完全对应
+
+    为什么用 iloc[-2] 而非 iloc[-1]:
+        - iloc[-1] 是当前正在形成的K线，数据不完整
+        - iloc[-2] 是最近一根已闭合的K线，数据完整可靠
+        - 使用未闭合K线会导致回测过于乐观 (前向偏差)
+    """
 
     closes = df["close"].values
     n = len(closes)
 
     position: Optional[Position] = None
     trades = []
-    equity = [1.0]
+    equity = [Decimal("1.0")]
     last_trade_bar = -config.cooldown_bars
 
-    # 从第 61 根bar开始 (需要 60 根历史)
+    # 转换配置为 float 用于 numpy 计算 (内部计算用 float，最终结果用 Decimal)
+    signal_threshold = float(config.signal_threshold)
+    stop_loss = float(config.stop_loss)
+    take_profit = float(config.take_profit)
+    fee_rate = float(config.fee_rate)
+    slippage = float(config.slippage)
+
+    # 从第 61 根bar开始 (需要 60 根历史计算滚动特征)
     for i in range(60, n - 1):
         current_price = closes[i]
 
         # 使用已收盘bar的预测 (与实盘一致: iloc[-2])
+        # predictions[i] 是基于 bar[i] 的完整数据计算的
         pred = predictions[i]
 
         # 检查是否需要平仓
@@ -198,10 +253,10 @@ def simulate_trading(
             should_close = False
             close_reason = ""
 
-            if pnl_pct <= -config.stop_loss:
+            if pnl_pct <= -stop_loss:
                 should_close = True
                 close_reason = "stop_loss"
-            elif pnl_pct >= config.take_profit:
+            elif pnl_pct >= take_profit:
                 should_close = True
                 close_reason = "take_profit"
             elif bars_held >= config.time_limit_bars:
@@ -210,8 +265,8 @@ def simulate_trading(
 
             if should_close:
                 # 扣除手续费和滑点
-                exit_price = current_price * (1 - config.slippage * position.side)
-                fee = config.fee_rate * 2  # 开仓+平仓
+                exit_price = current_price * (1 - slippage * position.side)
+                fee = fee_rate * 2  # 开仓+平仓
 
                 if position.side == 1:
                     net_pnl = (exit_price - entry_price) / entry_price - fee
@@ -223,60 +278,60 @@ def simulate_trading(
                     "side": position.side,
                     "entry_bar": position.entry_bar,
                     "exit_bar": i,
-                    "entry_price": entry_price,
-                    "exit_price": exit_price,
-                    "pnl_pct": net_pnl,
+                    "entry_price": Decimal(str(entry_price)),
+                    "exit_price": Decimal(str(exit_price)),
+                    "pnl_pct": Decimal(str(net_pnl)),
                     "reason": close_reason,
                 })
 
-                equity.append(equity[-1] * (1 + net_pnl))
+                equity.append(equity[-1] * (1 + Decimal(str(net_pnl))))
                 position = None
                 last_trade_bar = i
 
         # 检查是否开仓
         if position is None and (i - last_trade_bar) >= config.cooldown_bars:
             signal = 0
-            if pred > config.signal_threshold:
+            if pred > signal_threshold:
                 signal = 1
-            elif pred < -config.signal_threshold:
+            elif pred < -signal_threshold:
                 signal = -1
 
             if signal != 0:
-                entry_price = current_price * (1 + config.slippage * signal)
+                entry_price = current_price * (1 + slippage * signal)
                 position = Position(
                     side=signal,
                     entry_price=entry_price,
                     entry_bar=i,
                 )
 
-    # 强制平仓
+    # 强制平仓 (回测结束时)
     if position is not None:
         exit_price = closes[-1]
         if position.side == 1:
-            net_pnl = (exit_price - position.entry_price) / position.entry_price - config.fee_rate * 2
+            net_pnl = (exit_price - position.entry_price) / position.entry_price - fee_rate * 2
         else:
-            net_pnl = (position.entry_price - exit_price) / position.entry_price - config.fee_rate * 2
+            net_pnl = (position.entry_price - exit_price) / position.entry_price - fee_rate * 2
 
         trades.append({
             "instrument": instrument,
             "side": position.side,
             "entry_bar": position.entry_bar,
             "exit_bar": n - 1,
-            "entry_price": position.entry_price,
-            "exit_price": exit_price,
-            "pnl_pct": net_pnl,
+            "entry_price": Decimal(str(position.entry_price)),
+            "exit_price": Decimal(str(exit_price)),
+            "pnl_pct": Decimal(str(net_pnl)),
             "reason": "end_of_test",
         })
-        equity.append(equity[-1] * (1 + net_pnl))
+        equity.append(equity[-1] * (1 + Decimal(str(net_pnl))))
 
-    # 计算指标
-    equity = np.array(equity)
-    returns = np.diff(equity) / equity[:-1] if len(equity) > 1 else np.array([])
+    # 计算指标 (转换 Decimal 回 float 用于 numpy 计算)
+    equity_float = np.array([float(e) for e in equity])
+    returns = np.diff(equity_float) / equity_float[:-1] if len(equity_float) > 1 else np.array([])
 
     return {
         "instrument": instrument,
         "trades": trades,
-        "equity": equity,
+        "equity": equity_float,
         "returns": returns,
     }
 
@@ -293,6 +348,11 @@ def print_summary(results: list, config: BacktestConfig):
         return
 
     df = pd.DataFrame(all_trades)
+
+    # 转换 Decimal 为 float 用于计算 (Decimal 与 pandas 计算兼容性)
+    df["pnl_pct"] = df["pnl_pct"].astype(float)
+    df["entry_price"] = df["entry_price"].astype(float)
+    df["exit_price"] = df["exit_price"].astype(float)
 
     # 基础统计
     total_trades = len(df)
@@ -366,9 +426,9 @@ def main():
     args = parser.parse_args()
 
     config = BacktestConfig(
-        signal_threshold=args.signal_threshold,
-        stop_loss=args.stop_loss,
-        take_profit=args.take_profit,
+        signal_threshold=Decimal(str(args.signal_threshold)),
+        stop_loss=Decimal(str(args.stop_loss)),
+        take_profit=Decimal(str(args.take_profit)),
     )
 
     run_backtest(
