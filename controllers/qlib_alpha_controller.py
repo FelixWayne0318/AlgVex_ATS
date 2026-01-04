@@ -1,5 +1,5 @@
 """
-Qlib Alpha 控制器 (v9.0.0)
+Qlib Alpha 控制器 (v10.0.4)
 
 基于统一特征计算的交易信号控制器。
 
@@ -9,7 +9,7 @@ V2 架构中，Controller 负责:
 3. 应用相同的归一化参数
 4. 生成 ExecutorAction 供策略执行
 
-重要变更 (v9.0.0):
+重要变更 (v10.0.4):
 - 使用 unified_features.py 计算特征，与训练完全一致
 - 加载训练时保存的归一化参数
 - 保证特征列顺序与训练一致
@@ -83,22 +83,26 @@ class QlibAlphaControllerConfig(ControllerConfigBase):
     # 三重屏障配置 (用于 PositionExecutor)
     stop_loss: Decimal = Field(default=Decimal("0.02"))
     take_profit: Decimal = Field(default=Decimal("0.03"))
-    time_limit: int = Field(default=3600)
+    time_limit: int = Field(default=86400)  # 24小时 (与回测 24 bars 一致)
 
     # 执行配置
-    cooldown_interval: int = Field(default=60)
+    cooldown_interval: int = Field(default=3600)  # 1小时 (与回测 1 bar 一致)
     max_executors_per_side: int = Field(default=1)
 
 
 class QlibAlphaController(ControllerBase):
     """
-    Qlib Alpha 控制器 (v9.0.0)
+    Qlib Alpha 控制器 (v10.0.4)
 
     V2 架构中的核心组件，负责:
     1. 接收 MarketDataProvider 数据
     2. 使用统一特征模块计算特征 (与训练完全一致)
     3. 应用训练时保存的归一化参数
     4. 生成 PositionExecutor 动作
+
+    注意:
+    - 实盘交易的手续费和滑点由交易所实际收取，不在此配置
+    - 回测中的 fee_rate (0.1%) 和 slippage (0.05%) 用于模拟真实交易成本
     """
 
     def __init__(self, config: QlibAlphaControllerConfig, *args, **kwargs):

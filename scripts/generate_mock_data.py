@@ -48,7 +48,7 @@ def generate_mock_data():
         "freq": "1h",
         "timezone": "UTC",
         "instruments": [],
-        "columns": ["open", "high", "low", "close", "volume"],
+        "columns": ["open", "high", "low", "close", "volume", "quote_volume"],
         "source": "mock_data",  # 标识为模拟数据
     }
 
@@ -60,12 +60,14 @@ def generate_mock_data():
         close = base_price * np.exp(np.cumsum(returns))
 
         # 生成 OHLCV 数据
+        volume = np.random.uniform(100, 1000, n)
         df = pd.DataFrame({
             'open': close * (1 + np.random.randn(n) * 0.005),
             'high': close * (1 + np.abs(np.random.randn(n)) * 0.01),
             'low': close * (1 - np.abs(np.random.randn(n)) * 0.01),
             'close': close,
-            'volume': np.random.uniform(100, 1000, n),
+            'volume': volume,
+            'quote_volume': volume * close,  # 交易额 = 交易量 × 价格
         }, index=dates)
 
         # 确保 high >= max(open, close) 和 low <= min(open, close)
