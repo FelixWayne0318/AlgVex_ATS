@@ -7,8 +7,14 @@ AlgVex v10.0.4 - 模拟数据生成脚本
 
 用法:
     python scripts/generate_mock_data.py
+
+输出文件:
+    ~/.algvex/data/1h/btcusdt.parquet
+    ~/.algvex/data/1h/ethusdt.parquet
+    ~/.algvex/data/1h/metadata.json   # 与 prepare_crypto_data.py 格式一致
 """
 
+import json
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -37,6 +43,15 @@ def generate_mock_data():
         ('ethusdt', 2000, 43),
     ]
 
+    # 初始化 metadata (与 prepare_crypto_data.py 格式一致)
+    metadata = {
+        "freq": "1h",
+        "timezone": "UTC",
+        "instruments": [],
+        "columns": ["open", "high", "low", "close", "volume"],
+        "source": "mock_data",  # 标识为模拟数据
+    }
+
     for symbol, base_price, seed in symbols:
         np.random.seed(seed)
 
@@ -61,8 +76,23 @@ def generate_mock_data():
         output_path = data_dir / f'{symbol}.parquet'
         df.to_parquet(output_path)
 
+        # 更新 metadata (与 prepare_crypto_data.py 格式一致)
+        metadata["instruments"].append({
+            "name": symbol,
+            "start": df.index.min().isoformat(),
+            "end": df.index.max().isoformat(),
+            "rows": len(df),
+            "gaps": 0,  # 模拟数据无缺口
+        })
+
         print(f"Created {symbol}.parquet: {len(df)} bars")
         print(f"  - Price range: ${df['close'].min():.2f} ~ ${df['close'].max():.2f}")
+
+    # 保存 metadata.json (与 prepare_crypto_data.py 格式一致)
+    metadata_path = data_dir / "metadata.json"
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+    print(f"\nCreated metadata.json")
 
     print(f"\nData saved to: {data_dir}")
     print("Done!")

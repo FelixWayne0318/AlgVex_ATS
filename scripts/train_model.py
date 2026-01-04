@@ -96,26 +96,21 @@ def train_model(
 
     # 计算统一特征
     print("Computing unified features...")
-    all_features = []
-    all_labels = []
+    all_data_list = []
 
     for inst, df in all_data.items():
         features = compute_unified_features(df)
         labels = compute_label(df)
 
+        # 在单币种内合并 label (基于 index 对齐，避免多币种 concat 后错位)
+        features["label"] = labels  # 基于 index 自动对齐
         features["datetime"] = features.index
         features["instrument"] = inst
-        labels.name = "label"
 
-        all_features.append(features)
-        all_labels.append(labels)
+        all_data_list.append(features)
 
-    features_df = pd.concat(all_features)
-    labels_df = pd.concat(all_labels)
-
-    # 合并并清理
-    data = features_df.copy()
-    data["label"] = labels_df.values
+    # 合并所有币种数据
+    data = pd.concat(all_data_list)
     data = data.dropna()
 
     print(f"Features shape: {data.shape}")
