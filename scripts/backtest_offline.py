@@ -42,10 +42,10 @@ except ImportError:
 @dataclass
 class BacktestConfig:
     """回测配置 (与实盘 controller 配置一致)"""
-    signal_threshold: float = 0.001
+    signal_threshold: float = 0.005
     stop_loss: float = 0.02
     take_profit: float = 0.03
-    time_limit_hours: int = 24
+    time_limit_bars: int = 24  # 最长持仓时间 (单位: bar数)
     cooldown_bars: int = 1  # 同一根bar不重复交易
     fee_rate: float = 0.001  # 0.1% 手续费
     slippage: float = 0.0005  # 0.05% 滑点
@@ -204,7 +204,7 @@ def simulate_trading(
             elif pnl_pct >= config.take_profit:
                 should_close = True
                 close_reason = "take_profit"
-            elif bars_held >= config.time_limit_hours:
+            elif bars_held >= config.time_limit_bars:
                 should_close = True
                 close_reason = "time_limit"
 
@@ -359,7 +359,7 @@ def main():
     parser.add_argument("--test-start", type=str, default="2024-07-01")
     parser.add_argument("--test-end", type=str, default="2024-12-31")
     parser.add_argument("--freq", type=str, default="1h")
-    parser.add_argument("--signal-threshold", type=float, default=0.001)
+    parser.add_argument("--signal-threshold", type=float, default=0.005)
     parser.add_argument("--stop-loss", type=float, default=0.02)
     parser.add_argument("--take-profit", type=float, default=0.03)
 
