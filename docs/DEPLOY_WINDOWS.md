@@ -1,4 +1,4 @@
-# AlgVex v10.1.0 Windows 本地部署指南
+# AlgVex v10.2.0 Windows 本地部署指南
 
 > **目标**: 在 Windows 本地电脑上从零开始部署 AlgVex 并运行教程
 
@@ -8,7 +8,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    AlgVex v10.1.0 依赖结构                    │
+│                    AlgVex v10.2.0 依赖结构                    │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │  【基础层】 numpy, pandas, lightgbm, pyarrow                │
@@ -98,12 +98,10 @@ venv\Scripts\activate
 
 ```cmd
 python -m pip install --upgrade pip
-python -m pip install numpy pandas pyarrow lightgbm scikit-learn plotly jupyter notebook binance-historical-data
+python -m pip install numpy pandas pyarrow requests lightgbm scikit-learn plotly jupyter notebook
 ```
 
 > **注意**: Windows 上必须使用 `python -m pip` 而不是直接 `pip`，否则升级 pip 时会报错。
->
-> `binance-historical-data` 是 v10.1.0 新增的官方数据下载依赖，用于从 data.binance.vision 下载历史数据。
 
 ### Step 6: 创建数据目录
 
@@ -235,7 +233,7 @@ jupyter notebook
 ```batch
 @echo off
 echo ========================================
-echo   AlgVex v10.1.0 启动脚本
+echo   AlgVex v10.2.0 启动脚本
 echo ========================================
 cd /d %USERPROFILE%\AlgVex_ATS
 call venv\Scripts\activate
@@ -314,7 +312,7 @@ python scripts/verify_integration.py
 ├── AlgVex_ATS\                    # 项目代码
 │   ├── scripts\                   # 核心脚本 (不依赖 Hummingbot)
 │   │   ├── unified_features.py    # 59 因子计算
-│   │   ├── prepare_crypto_data.py # 数据准备 (v10.1.0 官方数据源)
+│   │   ├── prepare_crypto_data.py # 数据准备 (v10.2.0 官方数据源)
 │   │   ├── generate_mock_data.py  # 模拟数据生成
 │   │   ├── train_model.py         # 模型训练
 │   │   ├── backtest_offline.py    # 离线回测
@@ -447,5 +445,5 @@ python scripts/prepare_crypto_data.py --api-base https://api.binance.us
 
 ---
 
-**版本**: v10.1.0
+**版本**: v10.2.0
 **更新日期**: 2026-01-04
